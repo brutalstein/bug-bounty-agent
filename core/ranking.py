@@ -1,0 +1,365 @@
+from __future__ import annotations
+
+from dataclasses import dataclass, asdict
+from pathlib import Path
+import hashlib
+import json
+
+
+@dataclass
+class RankedCandidate:
+    rank: int
+    ranked_id: str
+    source_item_id: str
+    target: str
+    category: str
+    reportability: str
+    original_priority: str
+    final_bucket: str
+    final_score: int
+    priority_score: int
+    confidence_score: int
+    impact_score: int
+    noise_score: int
+    manual_approval_required: bool
+    reason: str
+    why_ranked: list[str]
+    safe_next_steps: list[str]
+    evidence_refs: list[str]
+    notes: str
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+@dataclass
+class RankedCandidateSummary:
+    target: str
+    total_ranked: int
+    top_priority_count: int
+    manual_review_count: int
+    review_later_count: int
+    recon_only_count: int
+    likely_noise_count: int
+    ranked_candidates: list[dict]
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+class CandidateRanker:
+    def __init__(self, run_dir: str | Path):
+        self.run_dir = Path(run_dir)
+        self.parsed_dir = self.run_dir / "parsed"
+        self.output_path = self.parsed_dir / "ranked_candidates.json"
+
+    def rank(self) -> RankedCandidateSummary:
+        run_data = self._read_json(self.run_dir / "run.json")
+        validation_plan = self._read_json(self.parsed_dir / "validation_plan.json")
+
+        target = run_data.get("target_url", "unknown") if isinstance(run_data, dict) else "unknown"
+        items = validation_plan.get("items", []) if isinstance(validation_plan, dict) else []
+
+        ranked: list[RankedCandidate] = []
+
+        for item in items:
+            ranked.append(self._rank_item(item))
+
+        ranked_sorted = sorted(
+            ranked,
+            key=lambda candidate: candidate.final_score,
+            reverse=True,
+        )
+
+        for index, candidate in enumerate(ranked_sorted, start=1):
+            candidate.rank = index
+
+        summary = RankedCandidateSummary(
+            target=target,
+            total_ranked=len(ranked_sorted),
+            top_priority_count=sum(1 for item in ranked_sorted if item.final_bucket == "top_priority"),
+            manual_review_count=sum(1 for item in ranked_sorted if item.final_bucket == "manual_review"),
+            review_later_count=sum(1 for item in ranked_sorted if item.final_bucket == "review_later"),
+            recon_only_count=sum(1 for item in ranked_sorted if item.final_bucket == "recon_only"),
+            likely_noise_count=sum(1 for item in ranked_sorted if item.final_bucket == "likely_noise"),
+            ranked_candidates=[item.to_dict() for item in ranked_sorted],
+        )
+
+        self.output_path.write_text(
+            json.dumps(summary.to_dict(), indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+        return summary
+
+    def _rank_item(self, item: dict) -> RankedCandidate:
+        item_id = str(item.get("item_id", "unknown"))
+        target = str(item.get("target", "unknown"))
+        category = str(item.get("category", "unknown"))
+        reportability = str(item.get("reportability", "unknown"))
+        original_priority = str(item.get("priority", "unknown"))
+        manual_approval_required = item.get("manual_approval_required") is True
+        evidence_refs = item.get("evidence_refs", [])
+        safe_steps = item.get("safe_validation_steps", [])
+        notes = str(item.get("notes", ""))
+        reason = str(item.get("reason", ""))
+
+        priority_score = self._priority_score(original_priority)
+        confidence_score = self._confidence_score(item)
+        impact_score = self._impact_score(item)
+        noise_score = self._noise_score(item)
+
+        raw_score = priority_score + confidence_score + impact_score - noise_score
+        final_score = max(0, min(100, raw_score))
+
+        final_bucket = self._bucket(
+            final_score=final_score,
+            reportability=reportability,
+            noise_score=noise_score,
+        )
+
+        why_ranked = self._why_ranked(
+            item=item,
+            final_score=final_score,
+            priority_score=priority_score,
+            confidence_score=confidence_score,
+            impact_score=impact_score,
+            noise_score=noise_score,
+            final_bucket=final_bucket,
+        )
+
+        return RankedCandidate(
+            rank=0,
+            ranked_id=self._make_id("ranked", item_id, target, category),
+            source_item_id=item_id,
+            target=target,
+            category=category,
+            reportability=reportability,
+            original_priority=original_priority,
+            final_bucket=final_bucket,
+            final_score=final_score,
+            priority_score=priority_score,
+            confidence_score=confidence_score,
+            impact_score=impact_score,
+            noise_score=noise_score,
+            manual_approval_required=manual_approval_required,
+            reason=reason,
+            why_ranked=why_ranked,
+            safe_next_steps=safe_steps if isinstance(safe_steps, list) else [],
+            evidence_refs=evidence_refs if isinstance(evidence_refs, list) else [],
+            notes=notes,
+        )
+
+    def _priority_score(self, priority: str) -> int:
+        scores = {
+            "critical": 45,
+            "high": 35,
+            "medium": 22,
+            "low": 10,
+            "info": 3,
+            "unknown": 0,
+        }
+
+        return scores.get(priority.lower(), 0)
+
+    def _confidence_score(self, item: dict) -> int:
+        score = 0
+
+        evidence_refs = item.get("evidence_refs", [])
+        evidence_blob = " ".join(str(ref) for ref in evidence_refs).lower()
+        reportability = str(item.get("reportability", "")).lower()
+        source = str(item.get("source", "")).lower()
+
+        if "status_code=200" in evidence_blob:
+            score += 14
+
+        if "accessible=true" in evidence_blob:
+            score += 12
+
+        if "auth_required=true" in evidence_blob:
+            score += 6
+
+        if "sensitive_indicators=[]" in evidence_blob:
+            score -= 10
+
+        if "sensitive_indicators=" in evidence_blob and "sensitive_indicators=[]" not in evidence_blob:
+            score += 18
+
+        if reportability == "potential_report_candidate":
+            score += 16
+
+        if reportability == "false_positive_possible":
+            score -= 18
+
+        if source == "endpoint_validation":
+            score += 8
+
+        if source == "js_analysis":
+            score -= 4
+
+        return max(0, score)
+
+    def _impact_score(self, item: dict) -> int:
+        score = 0
+
+        category = str(item.get("category", "")).lower()
+        target = str(item.get("target", "")).lower()
+        notes = str(item.get("notes", "")).lower()
+
+        high_impact_terms = [
+            "sensitive_exposure",
+            "password",
+            "token",
+            "secret",
+            "hash",
+            "admin",
+            "wallet",
+            "payment",
+            "basket",
+            "order",
+            "user",
+            "profile",
+            "account",
+            "authentication",
+            "authorization",
+        ]
+
+        for term in high_impact_terms:
+            if term in category or term in target or term in notes:
+                score += 3
+
+        if "potential_sensitive_exposure" in category:
+            score += 22
+
+        if "admin" in category:
+            score += 16
+
+        if "user_data" in category:
+            score += 12
+
+        if "business_logic" in category:
+            score += 12
+
+        if "authentication" in category:
+            score += 10
+
+        if "reachable_api_mapping" in category:
+            score += 3
+
+        return min(score, 35)
+
+    def _noise_score(self, item: dict) -> int:
+        score = 0
+
+        category = str(item.get("category", "")).lower()
+        target = str(item.get("target", "")).lower()
+        reportability = str(item.get("reportability", "")).lower()
+        evidence_refs = item.get("evidence_refs", [])
+        evidence_blob = " ".join(str(ref) for ref in evidence_refs).lower()
+
+        if reportability == "recon_only":
+            score += 20
+
+        if reportability == "false_positive_possible":
+            score += 30
+
+        if category in {"reachable_api_mapping", "high_value_javascript_review"}:
+            score += 12
+
+        if target.endswith((".js", ".css", ".png", ".jpg", ".jpeg", ".svg", ".ico")):
+            score += 12
+
+        if "status_code=500" in evidence_blob:
+            score += 8
+
+        if "accessible=false" in evidence_blob and "auth_required=false" in evidence_blob:
+            score += 8
+
+        if "sensitive_indicators=[]" in evidence_blob:
+            score += 12
+
+        if "{{href}}" in target or "%7b%7bhref%7d%7d" in target:
+            score += 25
+
+        return min(score, 60)
+
+    def _bucket(
+        self,
+        final_score: int,
+        reportability: str,
+        noise_score: int,
+    ) -> str:
+        reportability = reportability.lower()
+
+        if reportability == "false_positive_possible" or noise_score >= 45:
+            return "likely_noise"
+
+        if final_score >= 78:
+            return "top_priority"
+
+        if final_score >= 58:
+            return "manual_review"
+
+        if final_score >= 35:
+            return "review_later"
+
+        if reportability == "recon_only":
+            return "recon_only"
+
+        return "review_later"
+
+    def _why_ranked(
+        self,
+        item: dict,
+        final_score: int,
+        priority_score: int,
+        confidence_score: int,
+        impact_score: int,
+        noise_score: int,
+        final_bucket: str,
+    ) -> list[str]:
+        reasons = [
+            f"Final score: {final_score}",
+            f"Bucket: {final_bucket}",
+            f"Priority contribution: {priority_score}",
+            f"Confidence contribution: {confidence_score}",
+            f"Impact contribution: {impact_score}",
+            f"Noise penalty: {noise_score}",
+        ]
+
+        reportability = str(item.get("reportability", "unknown"))
+        reasons.append(f"Reportability class: {reportability}")
+
+        if item.get("manual_approval_required") is True:
+            reasons.append("Manual approval required before deeper validation.")
+
+        return reasons
+
+    def _read_json(self, path: Path) -> dict | list:
+        if not path.exists():
+            return {}
+
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            return {}
+
+    def _make_id(self, *parts: str) -> str:
+        raw = "|".join(parts)
+        digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:12]
+        return f"ranked-{digest}"
+
+
+if __name__ == "__main__":
+    import sys
+
+    if len(sys.argv) != 2:
+        print("Usage: python core/ranking.py <run_dir>")
+        raise SystemExit(1)
+
+    ranker = CandidateRanker(sys.argv[1])
+    summary = ranker.rank()
+
+    print(f"Ranked candidates: {summary.total_ranked}")
+    print(f"Top priority: {summary.top_priority_count}")
+    print(f"Output: {ranker.output_path}")

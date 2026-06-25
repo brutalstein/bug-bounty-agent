@@ -1,0 +1,58 @@
+tool_groups:
+  core:
+    - name: "python"
+      command: "python"
+      required: true
+      purpose: "Project runtime"
+
+    - name: "git"
+      command: "git"
+      required: true
+      purpose: "Repository and tool installation"
+
+    - name: "docker"
+      command: "docker"
+      required: true
+      purpose: "Lab and sandbox runtime"
+
+    - name: "go"
+      command: "go"
+      required: false
+      purpose: "Install ProjectDiscovery tools"
+
+  projectdiscovery:
+    - name: "subfinder"
+      command: "subfinder"
+      required: false
+      purpose: "Passive subdomain discovery"
+
+    - name: "httpx"
+      command: "httpx"
+      required: false
+      purpose: "HTTP probing and tech detection"
+
+    - name: "katana"
+      command: "katana"
+      required: false
+      purpose: "Crawler and endpoint discovery"
+
+    - name: "nuclei"
+      command: "nuclei"
+      required: false
+      purpose: "Template-based vulnerability scanning"
+
+  future:
+    - name: "zap"
+      command: "zap.sh"
+      required: false
+      purpose: "OWASP ZAP automation"
+
+    - name: "semgrep"
+      command: "semgrep"
+      required: false
+      purpose: "Static code analysis"
+
+    - name: "trufflehog"
+      command: "trufflehog"
+      required: false
+      purpose: "Secret scanning"

@@ -1,0 +1,100 @@
+project:
+  name: "bug-bounty-agent"
+  mode: "lab"
+  description: "Authorized bug bounty automation assistant"
+
+active_profile: "owasp-juice-shop-local"
+
+profiles:
+  owasp-juice-shop-local:
+    target_profile:
+      name: "owasp-juice-shop-local"
+      type: "training-lab"
+      base_url: "http://localhost:3000"
+
+    scope:
+      allowed_hosts:
+        - "localhost"
+        - "127.0.0.1"
+
+      allowed_url_patterns:
+        - "http://localhost:3000/*"
+        - "http://127.0.0.1:3000/*"
+
+      blocked_hosts: []
+
+      blocked_path_prefixes:
+        - "/logout"
+        - "/basket"
+        - "/checkout"
+        - "/payment"
+        - "/admin"
+
+    rules:
+      max_requests_per_minute: 60
+      allow_subdomain_scan: false
+      allow_port_scan: false
+      allow_active_scan: true
+      allow_browser_crawl: true
+      require_scope_check: true
+      save_all_outputs: true
+
+    safety:
+      stop_on_scope_violation: true
+      stop_on_high_error_rate: true
+      destructive_actions_allowed: false
+
+    authorization:
+      kind: "local_lab"
+      confirmed: true
+      evidence: "Local OWASP Juice Shop lab started by the operator."
+
+    policy:
+      program_name: "OWASP Juice Shop Local Lab"
+      program_url: "https://owasp.org/www-project-juice-shop/"
+      allowed_http_methods:
+        - "GET"
+        - "HEAD"
+        - "OPTIONS"
+        - "POST"
+      requires_manual_approval_for:
+        - "authenticated_crawl"
+        - "browser_screenshots"
+        - "active_validation"
+        - "state_changing_requests"
+      disallowed_actions:
+        - "unauthorized_scanning"
+        - "destructive_actions"
+        - "credential_attacks"
+        - "brute_force"
+        - "denial_of_service"
+        - "automatic_submission"
+      notes:
+        - "Initial real test target is OWASP Juice Shop running locally."
+        - "Never scan assets outside allowed_hosts and allowed_url_patterns."
+        - "Later profiles can be added for PortSwigger labs and real bug bounty scopes."
+        - "POST is allowed here only for explicit, manual-approval authenticated lab session bootstrap."
+
+    session_profiles:
+      juice-shop-customer:
+        kind: "juice_shop_jwt"
+        login_url: "http://localhost:3000/rest/user/login"
+        username_field: "email"
+        password_field: "password"
+        username_default: "mc.safesearch@juice-sh.op"
+        password_default: "Mr. N00dles"
+        username_env: "BB_JUICE_SHOP_USER_EMAIL"
+        password_env: "BB_JUICE_SHOP_USER_PASSWORD"
+        token_json_path: "authentication.token"
+        auth_header_name: "Authorization"
+        auth_header_prefix: "Bearer"
+        role_hint: "customer"
+        notes:
+          - "Local lab-only seeded customer account."
+          - "Override with environment variables for custom lab credentials."
+
+    lab:
+      docker_image: "bkimminich/juice-shop"
+      container_name: "bb-juice"
+      published_port: 3000
+      container_port: 3000

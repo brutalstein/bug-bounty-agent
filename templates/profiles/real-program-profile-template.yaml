@@ -1,0 +1,64 @@
+target_profile:
+  name: "replace-with-program-slug"
+  type: "bug-bounty-program"
+  base_url: "https://target.example.com"
+
+scope:
+  allowed_hosts:
+    - "target.example.com"
+
+  allowed_url_patterns:
+    - "https://target.example.com/*"
+
+  blocked_hosts: []
+
+  blocked_path_prefixes:
+    - "/logout"
+    - "/delete"
+    - "/admin"
+
+rules:
+  max_requests_per_minute: 30
+  allow_subdomain_scan: false
+  allow_port_scan: false
+  allow_active_scan: false
+  allow_browser_crawl: false
+  require_scope_check: true
+  save_all_outputs: true
+
+safety:
+  stop_on_scope_violation: true
+  stop_on_high_error_rate: true
+  destructive_actions_allowed: false
+
+authorization:
+  kind: "manual_program_review"
+  confirmed: false
+  evidence: "Replace with official policy URL and your authorization notes."
+
+policy:
+  program_name: "Replace With Program Name"
+  program_url: "https://bugbounty.example.com/program"
+  allowed_http_methods:
+    - "GET"
+    - "HEAD"
+    - "OPTIONS"
+  requires_manual_approval_for:
+    - "authenticated_crawl"
+    - "browser_screenshots"
+    - "active_validation"
+    - "state_changing_requests"
+    - "port_scanning"
+  disallowed_actions:
+    - "unauthorized_scanning"
+    - "destructive_actions"
+    - "credential_attacks"
+    - "brute_force"
+    - "denial_of_service"
+    - "automatic_submission"
+  notes:
+    - "Copy only official, current program rules into this profile."
+    - "Do not set authorization.confirmed to true until you have explicit scope and policy review."
+    - "Keep risky capabilities disabled by default."
+
+session_profiles: {}

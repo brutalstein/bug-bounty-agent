@@ -1,0 +1,25 @@
+id: juice-shop-detect
+
+info:
+  name: OWASP Juice Shop Detection
+  author: bug-bounty-agent
+  severity: info
+  description: Detects OWASP Juice Shop by page title.
+  tags: lab,juice-shop,tech
+
+http:
+  - method: GET
+    path:
+      - "{{BaseURL}}/"
+
+    matchers:
+      - type: word
+        part: body
+        words:
+          - "OWASP Juice Shop"
+
+    extractors:
+      - type: regex
+        part: body
+        regex:
+          - "<title>(.*?)</title>"
