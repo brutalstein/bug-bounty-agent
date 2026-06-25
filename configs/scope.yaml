@@ -98,3 +98,65 @@ profiles:
       container_name: "bb-juice"
       published_port: 3000
       container_port: 3000
+
+  airtable-staging-public-h1:
+    target_profile:
+      name: "airtable-staging-public-h1"
+      type: "bug-bounty-program"
+      base_url: "https://staging.airtable.com"
+
+    scope:
+      allowed_hosts:
+        - "staging.airtable.com"
+        - "www.staging.airtable.com"
+
+      allowed_url_patterns:
+        - "https://staging.airtable.com/*"
+        - "https://www.staging.airtable.com/*"
+
+      blocked_hosts: []
+
+      blocked_path_prefixes: []
+
+    rules:
+      max_requests_per_minute: 10
+      allow_subdomain_scan: false
+      allow_port_scan: false
+      allow_active_scan: false
+      allow_browser_crawl: false
+      require_scope_check: true
+      save_all_outputs: true
+
+    safety:
+      stop_on_scope_violation: true
+      stop_on_high_error_rate: true
+      destructive_actions_allowed: false
+
+    authorization:
+      kind: "public_bug_bounty_policy"
+      confirmed: true
+      evidence: "Official Airtable security.txt points to HackerOne policy. Official HackerOne policy snippet says only perform testing against staging.airtable.com. Reviewed on 2026-06-25 for read-only probing only."
+
+    policy:
+      program_name: "Airtable HackerOne Bug Bounty"
+      program_url: "https://hackerone.com/airtable"
+      allowed_http_methods:
+        - "GET"
+        - "HEAD"
+        - "OPTIONS"
+      requires_manual_approval_for:
+        - "authenticated_crawl"
+        - "browser_screenshots"
+        - "active_validation"
+        - "state_changing_requests"
+      disallowed_actions:
+        - "unauthorized_scanning"
+        - "destructive_actions"
+        - "credential_attacks"
+        - "brute_force"
+        - "denial_of_service"
+        - "automatic_submission"
+      notes:
+        - "Official Airtable security.txt references the public HackerOne bug bounty program."
+        - "Official HackerOne policy snippet indicates testing should be limited to staging.airtable.com and not production airtable.com."
+        - "This profile is restricted to low-rate, read-only probing until fuller policy extraction is available."
