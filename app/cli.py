@@ -33,6 +33,7 @@ from core.report_generator import ReportGenerator
 from core.session_compare import SessionCompareRunner
 from tools.recon_tools import ReconTools
 from tools.crawl_tools import CrawlTools
+from tools.nmap_tools import NmapTools, SAFE_DEFAULT_PORTS
 from tools.projectdiscovery_tools import ProjectDiscoveryTools
 
 
@@ -222,6 +223,7 @@ def command_doctor(_: argparse.Namespace) -> int:
         PROJECT_ROOT / "tools" / "tool_runner.py",
         PROJECT_ROOT / "tools" / "recon_tools.py",
         PROJECT_ROOT / "tools" / "crawl_tools.py",
+        PROJECT_ROOT / "tools" / "nmap_tools.py",
         PROJECT_ROOT / "tools" / "projectdiscovery_tools.py",
         PROJECT_ROOT / "templates" / "lab" / "juice-shop-detect.yaml",
         PROJECT_ROOT / "templates" / "profiles" / "real-program-profile-template.yaml",
@@ -869,6 +871,78 @@ def command_pd_nuclei(args: argparse.Namespace) -> int:
         print_fail(f"Nuclei error: {nuclei_result.error}")
 
     return 0 if nuclei_result.success else 1
+
+
+def command_nmap_scan(args: argparse.Namespace) -> int:
+    scope = load_scope(args.profile)
+    allowed, result = validate_target_or_fail(
+        scope,
+        args.target,
+        "Safe nmap scan",
+        require_authorization=True,
+    )
+
+    if not allowed:
+        return 1
+
+    try:
+        scope.assert_port_scan_allowed(args.target)
+    except PermissionError as error:
+        print_fail(f"Safe nmap scan blocked: {error}")
+        print_info(
+            "Port scanning stays disabled unless the selected profile explicitly allows it and the program policy permits it."
+        )
+        return 1
+
+    if scope.requires_manual_approval("port_scanning") and not args.manual_approval:
+        print_fail(
+            "Safe nmap scan requires explicit manual approval. "
+            "Re-run with `--manual-approval` after confirming the policy explicitly allows conservative port scanning."
+        )
+        return 1
+
+    ctx = create_safe_run(scope, result["normalized_url"])
+    logger = create_run_logger(ctx.run_dir)
+    logger.info("Safe nmap scan initialized.")
+    logger.info(f"Profile: {ctx.profile_name}")
+    logger.info(f"Target: {ctx.target_url}")
+    logger.info(f"Ports: {args.ports}")
+
+    write_scope_artifacts(ctx, scope, result)
+
+    scanner = NmapTools(scope=scope, run_context=ctx)
+    summary = run_step(
+        "Running safe nmap scan",
+        lambda: scanner.run_safe_port_scan(
+            target=result["normalized_url"],
+            ports=args.ports,
+            timeout_seconds=args.scan_timeout,
+        ),
+        "Safe nmap scan completed",
+    )
+
+    dashboard_path = build_dashboard_safely(ctx.run_dir)
+
+    if summary.success:
+        print_ok("Safe nmap scan completed.")
+    else:
+        print_fail("Safe nmap scan finished with tool errors.")
+
+    print_info(f"Profile: {ctx.profile_name}")
+    print_info(f"Program: {ctx.program_name}")
+    print_info(f"Target host: {summary.target_host}")
+    print_info(f"Ports: {summary.ports}")
+    print_info(f"Host up: {summary.host_up}")
+    print_info(f"Open port count: {summary.open_port_count}")
+    print_info(f"JSON: {summary.parsed_json_path}")
+    print_info(f"Markdown: {summary.markdown_path}")
+    print_info(f"Run directory: {ctx.run_dir}")
+    if dashboard_path:
+        print_info(f"Dashboard file: {dashboard_path}")
+    if summary.error:
+        print_info(f"Tool error: {summary.error}")
+
+    return 0 if summary.success else 1
 
 
 def command_normalize_run(args: argparse.Namespace) -> int:
@@ -1831,6 +1905,30 @@ def build_parser() -> argparse.ArgumentParser:
     pd_nuclei_parser.add_argument("--rate-limit", type=int, default=10, help="Nuclei requests per second limit")
     pd_nuclei_parser.add_argument("--scan-timeout", type=int, default=30, help="Maximum subprocess timeout in seconds")
     pd_nuclei_parser.set_defaults(func=command_pd_nuclei)
+
+    nmap_parser = subparsers.add_parser(
+        "nmap-scan",
+        help="Run a conservative, policy-gated port scan against a single in-scope host",
+    )
+    add_profile_argument(nmap_parser)
+    nmap_parser.add_argument("target", help="Target URL or domain")
+    nmap_parser.add_argument(
+        "--ports",
+        default=SAFE_DEFAULT_PORTS,
+        help="Comma-separated TCP ports to probe conservatively",
+    )
+    nmap_parser.add_argument(
+        "--manual-approval",
+        action="store_true",
+        help="Required when the selected profile marks port scanning as a manual-approval area",
+    )
+    nmap_parser.add_argument(
+        "--scan-timeout",
+        type=int,
+        default=120,
+        help="Maximum subprocess timeout in seconds",
+    )
+    nmap_parser.set_defaults(func=command_nmap_scan)
 
     normalize_parser = subparsers.add_parser("normalize-run", help="Normalize raw tool outputs from a run directory")
     normalize_parser.add_argument("run_dir", help="Run directory path")

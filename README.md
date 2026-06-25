@@ -18,6 +18,7 @@ Private, local-first, authorized bug bounty automation assistant for safe recon,
 - Quick scan workflow for authorized lab targets
 - JavaScript route extraction and endpoint validation
 - Review queue, evidence pack, final report draft, and run artifact dashboard
+- Conservative, policy-gated `nmap` lane for later programs that explicitly allow port scanning
 
 ## Project Layout
 
@@ -80,3 +81,4 @@ python app/main.py profile-readiness --profile owasp-juice-shop-local --target h
 
 - `runs/` contains local execution artifacts and is intentionally ignored from Git.
 - Nmap and other higher-risk tooling remain postponed until policy parsing, onboarding, and manual approval gates are fully mature.
+- If a profile does not explicitly set `allow_port_scan: true`, `nmap-scan` fails safely.

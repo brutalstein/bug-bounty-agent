@@ -45,6 +45,11 @@ tool_groups:
       purpose: "Template-based vulnerability scanning"
 
   future:
+    - name: "nmap"
+      command: "nmap"
+      required: false
+      purpose: "Conservative single-host port and service discovery"
+
     - name: "zap"
       command: "zap.sh"
       required: false

@@ -49,6 +49,7 @@ class ArtifactIndexBuilder:
         available_reports = [
             path.name
             for path in [
+                self.reports_dir / "nmap_scan.md",
                 self.reports_dir / "review_queue.md",
                 self.reports_dir / "browser_evidence.md",
                 self.reports_dir / "authenticated_crawl.md",
@@ -66,6 +67,8 @@ class ArtifactIndexBuilder:
                 self.run_dir / "run.json",
                 self.parsed_dir / "scope_check.json",
                 self.parsed_dir / "policy_snapshot.json",
+                self.parsed_dir / "nmap_scan.json",
+                self.parsed_dir / "nmap_scan.xml",
                 self.parsed_dir / "preflight_check.json",
                 self.parsed_dir / "auth_session.json",
                 self.parsed_dir / "authenticated_crawl_result.json",
@@ -175,6 +178,7 @@ class ArtifactIndexBuilder:
         lines.append("")
         lines.append("## Report Artifacts")
         lines.append("")
+        lines.append(f"- `reports/nmap_scan.md` {'(present)' if (self.reports_dir / 'nmap_scan.md').exists() else '(missing)' }")
         lines.append(f"- `reports/review_queue.md` {'(present)' if (self.reports_dir / 'review_queue.md').exists() else '(missing)' }")
         lines.append(f"- `reports/browser_evidence.md` {'(present)' if (self.reports_dir / 'browser_evidence.md').exists() else '(missing)' }")
         lines.append(f"- `reports/authenticated_crawl.md` {'(present)' if (self.reports_dir / 'authenticated_crawl.md').exists() else '(missing)' }")

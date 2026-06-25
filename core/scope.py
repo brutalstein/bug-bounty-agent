@@ -322,6 +322,16 @@ class ScopeManager:
             "netloc": parsed.netloc,
         }
 
+    def extract_host(self, target: str) -> str:
+        if not target:
+            raise ValueError("Target cannot be empty.")
+
+        if target.startswith(("http://", "https://")):
+            return self.parse_target(target)["host"]
+
+        host = target.strip().split("/", 1)[0].split(":", 1)[0]
+        return host.lower()
+
     def is_host_allowed(self, host: str) -> bool:
         host = host.lower()
 
@@ -450,7 +460,32 @@ class ScopeManager:
             "disallowed_actions": self.config.policy.disallowed_actions,
             "notes": self.config.policy.notes,
             "session_profiles": self.list_session_profiles(),
+            "allow_port_scan": self.config.rules.allow_port_scan,
         }
+
+    def assert_port_scan_allowed(self, target: str) -> None:
+        host = self.extract_host(target)
+        if not self.is_host_allowed(host):
+            raise PermissionError(f"Port scan target host is out of scope: {host}")
+
+        if not self.config.rules.allow_port_scan:
+            raise PermissionError(
+                "Port scanning is disabled for the selected profile."
+            )
+
+        if not self.is_authorization_confirmed():
+            raise PermissionError(
+                "Authorization is not confirmed for the selected profile."
+            )
+
+        disallowed = {
+            item.strip().lower()
+            for item in self.config.policy.disallowed_actions
+        }
+        if "port_scanning" in disallowed:
+            raise PermissionError(
+                "Port scanning is explicitly disallowed by policy for the selected profile."
+            )
 
     def assert_allowed(self, target: str) -> None:
         result = self.explain(target)
