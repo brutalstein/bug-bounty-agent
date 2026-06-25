@@ -44,6 +44,28 @@ class CrawlResult:
 
 
 class CrawlTools:
+    NON_PAGE_EXTENSIONS = {
+        ".css",
+        ".js",
+        ".mjs",
+        ".map",
+        ".json",
+        ".ico",
+        ".png",
+        ".jpg",
+        ".jpeg",
+        ".gif",
+        ".svg",
+        ".webp",
+        ".woff",
+        ".woff2",
+        ".ttf",
+        ".eot",
+        ".pdf",
+        ".xml",
+        ".txt",
+    }
+
     def __init__(self, scope: ScopeManager, run_context: RunContext):
         self.scope = scope
         self.ctx = run_context
@@ -83,10 +105,16 @@ class CrawlTools:
 
             response = self.client.get(current_url, headers=headers)
 
-            title = self._extract_title(response.body)
-            links = self._extract_links(current_url, response.body)
-            page_forms = self._extract_forms(current_url, response.body)
-            page_scripts = self._extract_scripts(current_url, response.body)
+            if self._is_html_response(response.content_type, response.body):
+                title = self._extract_title(response.body)
+                links = self._extract_links(current_url, response.body)
+                page_forms = self._extract_forms(current_url, response.body)
+                page_scripts = self._extract_scripts(current_url, response.body)
+            else:
+                title = None
+                links = []
+                page_forms = []
+                page_scripts = []
 
             discovered.update(links)
             forms.extend(page_forms)
@@ -111,7 +139,7 @@ class CrawlTools:
 
             for link in links:
                 if link not in visited and link not in queue:
-                    if self.scope.is_target_allowed(link):
+                    if self.scope.is_target_allowed(link) and self._should_queue_page_url(link):
                         queue.append(link)
 
             time.sleep(delay_seconds)
@@ -218,6 +246,18 @@ class CrawlTools:
 
     def _clean_url(self, url: str) -> str:
         return url.rstrip("/")
+
+    def _is_html_response(self, content_type: str | None, body: str) -> bool:
+        if content_type and "html" in content_type.lower():
+            return True
+        return "<html" in body[:2000].lower()
+
+    def _should_queue_page_url(self, url: str) -> bool:
+        lowered = url.lower().split("?", 1)[0]
+        for extension in self.NON_PAGE_EXTENSIONS:
+            if lowered.endswith(extension):
+                return False
+        return True
 
     def _safe_filename(self, url: str) -> str:
         value = re.sub(r"[^a-zA-Z0-9._-]+", "_", url)
