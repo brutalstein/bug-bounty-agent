@@ -310,7 +310,9 @@ def command_profiles(_: argparse.Namespace) -> int:
 
 def command_policy_parse(args: argparse.Namespace) -> int:
     parser = PolicyParser()
-    parsed = parser.parse_file(args.policy_path)
+    primary_policy = parser.parse_file(args.policy_path)
+    extra_policies = [parser.parse_file(path) for path in args.append_policy]
+    parsed = parser.merge_policies(primary_policy, extra_policies)
 
     print_ok("Policy file parsed.")
     print_info(f"Source path: {parsed.source_path}")
@@ -480,6 +482,7 @@ def command_program_onboard(args: argparse.Namespace) -> int:
         allowed_hosts=args.allowed_host,
         allowed_url_patterns=args.allowed_pattern,
         blocked_path_prefixes=args.blocked_path_prefix,
+        append_policy_paths=args.append_policy,
     )
 
     print_ok("Program onboarding bundle created.")
@@ -1688,6 +1691,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Parse a local bug bounty policy document into a normalized safety summary",
     )
     policy_parser.add_argument("policy_path", help="Local path to a Markdown, text, YAML, or JSON policy file")
+    policy_parser.add_argument(
+        "--append-policy",
+        action="append",
+        default=[],
+        help="Additional local policy or standards files to merge into the normalized result.",
+    )
     policy_parser.add_argument("--output-json", help="Optional output path for normalized policy JSON")
     policy_parser.add_argument("--profile-name", help="Optional profile name for generating a profile stub")
     policy_parser.add_argument("--base-url", help="Base URL to include in the generated profile stub")
@@ -1721,6 +1730,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Create a review-first onboarding bundle from a local policy file",
     )
     onboard_parser.add_argument("policy_path", help="Local Markdown, text, YAML, or JSON policy file")
+    onboard_parser.add_argument(
+        "--append-policy",
+        action="append",
+        default=[],
+        help="Additional local policy or standards files to merge into the onboarding bundle.",
+    )
     onboard_parser.add_argument("profile_name", help="New profile name slug")
     onboard_parser.add_argument("base_url", help="Base URL for the program profile")
     onboard_parser.add_argument(

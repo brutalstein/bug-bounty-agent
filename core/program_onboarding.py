@@ -38,9 +38,16 @@ class ProgramOnboardingBuilder:
         allowed_hosts: list[str],
         allowed_url_patterns: list[str],
         blocked_path_prefixes: list[str] | None = None,
+        append_policy_paths: list[str | Path] | None = None,
     ) -> OnboardingBundleSummary:
         blocked_path_prefixes = blocked_path_prefixes or []
-        parsed_policy = self.policy_parser.parse_file(policy_path)
+        append_policy_paths = append_policy_paths or []
+        primary_policy = self.policy_parser.parse_file(policy_path)
+        extra_policies = [
+            self.policy_parser.parse_file(extra_path)
+            for extra_path in append_policy_paths
+        ]
+        parsed_policy = self.policy_parser.merge_policies(primary_policy, extra_policies)
         profile_stub = self.policy_parser.build_profile_stub(
             parsed_policy=parsed_policy,
             profile_name=profile_name,
@@ -73,6 +80,7 @@ class ProgramOnboardingBuilder:
                 allowed_hosts=allowed_hosts,
                 allowed_url_patterns=allowed_url_patterns,
                 parsed_policy=parsed_policy,
+                source_paths=[policy_path, *append_policy_paths],
             ),
             encoding="utf-8",
         )
@@ -99,6 +107,7 @@ class ProgramOnboardingBuilder:
         allowed_hosts: list[str],
         allowed_url_patterns: list[str],
         parsed_policy,
+        source_paths: list[str | Path],
     ) -> str:
         lines: list[str] = []
         lines.append("# Program Onboarding Checklist")
@@ -113,6 +122,7 @@ class ProgramOnboardingBuilder:
         lines.append(f"- **Base URL:** `{base_url}`")
         lines.append(f"- **Allowed Hosts:** `{allowed_hosts}`")
         lines.append(f"- **Allowed URL Patterns:** `{allowed_url_patterns}`")
+        lines.append(f"- **Policy Sources:** `{[str(path) for path in source_paths]}`")
         lines.append("")
         lines.append("## Required Manual Review")
         lines.append("")

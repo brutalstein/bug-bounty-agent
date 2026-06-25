@@ -90,6 +90,48 @@ class PolicyParser:
             },
         }
 
+    def merge_policies(
+        self,
+        primary_policy: ParsedPolicy,
+        additional_policies: list[ParsedPolicy],
+    ) -> ParsedPolicy:
+        policies = [primary_policy, *additional_policies]
+        merged_methods = primary_policy.allowed_http_methods or SAFE_DEFAULT_HTTP_METHODS[:]
+
+        for policy in additional_policies:
+            candidate_methods = policy.allowed_http_methods or SAFE_DEFAULT_HTTP_METHODS[:]
+            shared_methods = [method for method in merged_methods if method in candidate_methods]
+            merged_methods = shared_methods or merged_methods
+
+        return ParsedPolicy(
+            source_path=", ".join(policy.source_path for policy in policies),
+            source_type="+".join(
+                self._normalize_list([policy.source_type for policy in policies])
+            ),
+            program_name=primary_policy.program_name,
+            program_url=primary_policy.program_url,
+            allowed_http_methods=self._normalize_methods(merged_methods),
+            requires_manual_approval_for=self._normalize_list(
+                [
+                    item
+                    for policy in policies
+                    for item in policy.requires_manual_approval_for
+                ]
+            ),
+            disallowed_actions=self._normalize_list(
+                [item for policy in policies for item in policy.disallowed_actions]
+            ),
+            in_scope_lines=self._normalize_list(
+                [item for policy in policies for item in policy.in_scope_lines]
+            ),
+            out_of_scope_lines=self._normalize_list(
+                [item for policy in policies for item in policy.out_of_scope_lines]
+            ),
+            notes=self._normalize_list(
+                [item for policy in policies for item in policy.notes]
+            ),
+        )
+
     def _parse_structured_file(self, path: Path) -> ParsedPolicy:
         if path.suffix.lower() == ".json":
             raw = json.loads(path.read_text(encoding="utf-8"))

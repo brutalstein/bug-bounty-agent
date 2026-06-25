@@ -53,15 +53,19 @@ Use local copies of official policy documents first:
 
 ```bash
 python app/main.py policy-fetch https://about.gitlab.com/security/disclosure/ --slug gitlab-disclosure
+python app/main.py policy-fetch https://docs.hackerone.com/en/articles/8494488-core-ineligible-findings --slug h1-core-ineligible
 
-python app/main.py policy-parse runs/policy-fetch/<bundle>/normalized_policy_source.txt
+python app/main.py policy-parse \
+  runs/policy-fetch/<gitlab-bundle>/normalized_policy_source.txt \
+  --append-policy runs/policy-fetch/<h1-bundle>/normalized_policy_source.txt
 
 python app/main.py policy-parse templates/policies/real-program-policy-notes-template.md
 
 python app/main.py program-onboard \
-  runs/policy-fetch/<bundle>/normalized_policy_source.txt \
+  runs/policy-fetch/<gitlab-bundle>/normalized_policy_source.txt \
   example-program \
   https://target.example.com \
+  --append-policy runs/policy-fetch/<h1-bundle>/normalized_policy_source.txt \
   --allowed-host target.example.com \
   --allowed-pattern 'https://target.example.com/*'
 ```
