@@ -122,6 +122,7 @@ class FinalReportComposer:
         sensitive_indicators = item.get("sensitive_indicators", [])
         evidence_refs = item.get("evidence_refs", [])
         sample = str(item.get("redacted_response_sample", ""))
+        passive_signal_summary = item.get("passive_signal_summary", [])
         reason = str(item.get("reason", ""))
         notes = str(item.get("notes", ""))
 
@@ -171,6 +172,7 @@ class FinalReportComposer:
                 exposure_likely=exposure_likely,
                 sensitive_indicators=sensitive_indicators,
                 reason=reason,
+                passive_signal_summary=passive_signal_summary,
             ),
             potential_impact=self._impact_for_item(
                 category=category,
@@ -190,6 +192,7 @@ class FinalReportComposer:
                 exposure_likely=exposure_likely,
                 sensitive_indicators=sensitive_indicators,
                 final_score=final_score,
+                passive_signal_summary=passive_signal_summary,
             ),
             redacted_response_sample=sample,
             recommended_fix=self._recommended_fix(
@@ -223,6 +226,12 @@ class FinalReportComposer:
 
         if exposure_likely and sensitive_indicators:
             return f"Potential Sensitive Data Exposure via {path}"
+
+        if "cookie" in category or "session" in category:
+            return f"Session And Cookie Isolation Review Candidate on {path}"
+
+        if "storage" in category:
+            return f"Browser Storage State Review Candidate on {path}"
 
         if "authentication" in category:
             return f"Authentication Flow Review Candidate on {path}"
@@ -268,6 +277,9 @@ class FinalReportComposer:
         if "business_logic" in category or "user_data" in category:
             return "medium"
 
+        if "cookie" in category or "session" in category or "storage" in category:
+            return "low"
+
         return "informational"
 
     def _confidence(
@@ -282,6 +294,9 @@ class FinalReportComposer:
             return "medium"
 
         if final_score >= 58 and status_code is not None:
+            return "low-medium"
+
+        if final_score >= 58:
             return "low-medium"
 
         return "low"
@@ -315,11 +330,18 @@ class FinalReportComposer:
         exposure_likely: bool | None,
         sensitive_indicators: list[str],
         reason: str,
+        passive_signal_summary: list[str],
     ) -> str:
-        parts = [
-            f"The automated workflow identified `{target}` as `{category}`.",
-            f"A safe validation request observed status code `{status_code}` and content type `{content_type}`.",
-        ]
+        if "browser_" in category or "cookie" in category or "session" in category or "storage" in category:
+            parts = [
+                f"The automated workflow identified `{target}` as `{category}` during passive browser or session-state review.",
+                "This item is based on anonymous read-only state observation rather than active exploitation.",
+            ]
+        else:
+            parts = [
+                f"The automated workflow identified `{target}` as `{category}`.",
+                f"A safe validation request observed status code `{status_code}` and content type `{content_type}`.",
+            ]
 
         if exposure_likely:
             parts.append("The endpoint was marked as a potential exposure signal.")
@@ -329,6 +351,9 @@ class FinalReportComposer:
 
         if reason:
             parts.append(f"Original queue reason: {reason}")
+
+        if passive_signal_summary:
+            parts.append(f"Passive signal highlights: `{passive_signal_summary[:5]}`.")
 
         return " ".join(parts)
 
@@ -351,6 +376,13 @@ class FinalReportComposer:
             return (
                 "Authentication-related behavior can be security-sensitive, but this item is not reportable unless a concrete "
                 "bypass, data exposure, or policy-relevant weakness is manually confirmed."
+            )
+
+        if "cookie" in category or "session" in category or "storage" in category:
+            return (
+                "If manual review shows these anonymous cookies or storage keys carry stronger-than-expected session state, "
+                "the impact may range from weak session segregation assumptions to broader account-state exposure. "
+                "Current evidence is still passive and not enough to claim exploitability."
             )
 
         if "admin" in category:
@@ -396,8 +428,9 @@ class FinalReportComposer:
         exposure_likely: bool | None,
         sensitive_indicators: list[str],
         final_score: int,
+        passive_signal_summary: list[str],
     ) -> list[str]:
-        return [
+        items = [
             f"Status code: {status_code}",
             f"Content type: {content_type}",
             f"Accessible: {accessible}",
@@ -405,6 +438,11 @@ class FinalReportComposer:
             f"Sensitive indicators: {sensitive_indicators}",
             f"Final ranking score: {final_score}",
         ]
+
+        if isinstance(passive_signal_summary, list):
+            items.extend(f"Passive signal: {item}" for item in passive_signal_summary[:8])
+
+        return items
 
     def _recommended_fix(
         self,
@@ -422,6 +460,12 @@ class FinalReportComposer:
             return (
                 "Review authentication flow behavior, ensure protected endpoints enforce authentication consistently, "
                 "and avoid leaking implementation details in error responses."
+            )
+
+        if "cookie" in category or "session" in category or "storage" in category:
+            return (
+                "Review whether anonymous surfaces really need to set these cookies or storage keys, tighten cookie scope and attributes, "
+                "separate anonymous bootstrap state from authenticated session state, and add regression tests for public-surface session isolation."
             )
 
         if "admin" in category:

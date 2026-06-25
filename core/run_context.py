@@ -66,7 +66,13 @@ class RunContext:
             encoding="utf-8",
         )
 
-    def add_event(self, event_type: str, message: str, data: dict | None = None) -> None:
+    def add_event(
+        self,
+        event_type: str,
+        message: str,
+        data: dict | None = None,
+        persist_context: bool = False,
+    ) -> None:
         event = {
             "time": utc_now_iso(),
             "type": event_type,
@@ -78,7 +84,8 @@ class RunContext:
             file.write(json.dumps(event, ensure_ascii=False) + "\n")
 
         self.updated_at = utc_now_iso()
-        self.save()
+        if persist_context:
+            self.save()
 
     def update_status(self, status: str, message: str, data: dict | None = None) -> None:
         self.status = status
@@ -86,6 +93,7 @@ class RunContext:
             event_type="status_updated",
             message=message,
             data={"status": status, **(data or {})},
+            persist_context=True,
         )
 
     def write_json(self, relative_path: str, data: dict | list) -> Path:
@@ -182,6 +190,7 @@ def create_run_context(
             "authorization_kind": authorization_kind,
             "authorization_confirmed": authorization_confirmed,
         },
+        persist_context=True,
     )
 
     return context

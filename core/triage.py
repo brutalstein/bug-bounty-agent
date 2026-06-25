@@ -43,6 +43,7 @@ class TriageEngine:
         candidates.extend(self._candidates_from_js_analysis())
         candidates.extend(self._candidates_from_endpoint_validation())
         candidates.extend(self._candidates_from_session_signals())
+        candidates.extend(self._candidates_from_session_surface_compare())
         candidates.extend(self._candidates_from_browser_surface_compare())
 
         deduped = self._deduplicate(candidates)
@@ -325,6 +326,80 @@ class TriageEngine:
                             "Compare this passive browser state against another public surface.",
                             "Keep the review read-only and policy-compliant.",
                             "Do not attempt session tampering without explicit policy allowance and manual approval.",
+                        ]
+                    ),
+                    requires_manual_approval=True,
+                    reportable_now=False,
+                    notes=f"{rationale} Signals: {supporting_signals}",
+                )
+            )
+
+        return candidates
+
+    def _candidates_from_session_surface_compare(self) -> list[TriageCandidate]:
+        path = self.parsed_dir / "session_surface_compare.json"
+
+        if not path.exists():
+            return []
+
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            return []
+
+        hypotheses = data.get("hypotheses", [])
+        candidates: list[TriageCandidate] = []
+
+        if not isinstance(hypotheses, list):
+            return candidates
+
+        for item in hypotheses:
+            hypothesis_id = str(item.get("hypothesis_id", "unknown"))
+            severity = str(item.get("severity", "medium")).lower()
+            title = str(item.get("title", "Session surface hypothesis"))
+            rationale = str(item.get("rationale", ""))
+            affected_surfaces = item.get("affected_surfaces", [])
+            supporting_signals = item.get("supporting_signals", [])
+            safe_next_steps = item.get("safe_next_steps", [])
+
+            target = "unknown"
+            if isinstance(affected_surfaces, list) and affected_surfaces:
+                target = str(affected_surfaces[0])
+
+            lowered_title = title.lower()
+            if "cross-host redirect" in lowered_title:
+                category = "cross_host_session_bootstrap_review"
+            elif "without secure" in lowered_title:
+                category = "cookie_attribute_policy_review"
+            elif "domain scope" in lowered_title:
+                category = "cookie_scope_variance_review"
+            elif "samesite policy" in lowered_title:
+                category = "cookie_samesite_variance_review"
+            else:
+                category = "anonymous_session_bootstrap_review"
+
+            priority_map = {
+                "high": "high",
+                "medium": "high",
+                "low": "medium",
+            }
+            priority = priority_map.get(severity, "medium")
+
+            candidates.append(
+                TriageCandidate(
+                    candidate_id=self._make_id("session-surface", hypothesis_id, target),
+                    priority=priority,
+                    category=category,
+                    target=target,
+                    reason=title,
+                    source_finding_ids=[],
+                    recommended_safe_actions=(
+                        safe_next_steps
+                        if isinstance(safe_next_steps, list) and safe_next_steps
+                        else [
+                            "Repeat the comparison with a second anonymous surface using read-only requests only.",
+                            "Review cookie scope, attributes, and redirect provenance before making any claim.",
+                            "Do not attempt active session abuse without explicit policy allowance and manual approval.",
                         ]
                     ),
                     requires_manual_approval=True,

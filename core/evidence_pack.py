@@ -25,6 +25,7 @@ class EvidencePackItem:
     reason: str
     risk_hint: str
     redacted_response_sample: str
+    passive_signal_summary: list[str]
     safe_next_steps: list[str]
     evidence_refs: list[str]
     notes: str
@@ -73,12 +74,18 @@ class EvidencePackBuilder:
         endpoint_validation = self._read_json(self.parsed_dir / "endpoint_validation.json")
         policy_snapshot = self._read_json(self.parsed_dir / "policy_snapshot.json")
         browser_evidence = self._read_json(self.parsed_dir / "browser_evidence.json")
+        browser_surface_compare = self._read_json(self.parsed_dir / "browser_surface_compare.json")
+        session_surface_compare = self._read_json(self.parsed_dir / "session_surface_compare.json")
         session_compare = self._read_json(self.parsed_dir / "session_compare.json")
 
         target = run_data.get("target_url", "unknown") if isinstance(run_data, dict) else "unknown"
 
         endpoint_index = self._build_endpoint_index(endpoint_validation)
         screenshot_index = self._build_screenshot_index(browser_evidence)
+        passive_signal_index = self._build_passive_signal_index(
+            browser_surface_compare=browser_surface_compare,
+            session_surface_compare=session_surface_compare,
+        )
         session_compare_index = self._build_session_compare_index(session_compare)
 
         selected_items = []
@@ -97,6 +104,7 @@ class EvidencePackBuilder:
                 queue_item=item,
                 endpoint_index=endpoint_index,
                 screenshot_index=screenshot_index,
+                passive_signal_index=passive_signal_index,
                 session_compare_index=session_compare_index,
             )
             for item in selected_items
@@ -130,11 +138,13 @@ class EvidencePackBuilder:
         queue_item: dict,
         endpoint_index: dict[str, dict],
         screenshot_index: dict[str, list[str]],
+        passive_signal_index: dict[str, list[str]],
         session_compare_index: dict[str, list[str]],
     ) -> EvidencePackItem:
         target = str(queue_item.get("target", "unknown"))
         endpoint = endpoint_index.get(target, {})
         screenshot_refs = screenshot_index.get(target, [])
+        passive_signal_summary = passive_signal_index.get(target, [])
         session_compare_refs = session_compare_index.get(target, [])
         base_refs = queue_item.get("evidence_refs", [])
         merged_refs = [str(ref) for ref in base_refs] if isinstance(base_refs, list) else []
@@ -162,6 +172,7 @@ class EvidencePackBuilder:
             reason=str(queue_item.get("reason", "")),
             risk_hint=str(endpoint.get("risk_hint", "")),
             redacted_response_sample=str(endpoint.get("response_sample", "")),
+            passive_signal_summary=passive_signal_summary,
             safe_next_steps=queue_item.get("safe_next_steps", []),
             evidence_refs=merged_refs,
             notes=str(queue_item.get("notes", "")),
@@ -212,6 +223,100 @@ class EvidencePackBuilder:
                 note = f"{note}::{review_signal[:120]}"
 
             index.setdefault(target, []).append(note)
+
+        return index
+
+    def _build_passive_signal_index(
+        self,
+        browser_surface_compare: dict | list,
+        session_surface_compare: dict | list,
+    ) -> dict[str, list[str]]:
+        index: dict[str, list[str]] = {}
+
+        if isinstance(browser_surface_compare, dict):
+            surfaces = browser_surface_compare.get("surfaces", [])
+            hypotheses = browser_surface_compare.get("hypotheses", [])
+
+            if isinstance(surfaces, list):
+                for item in surfaces:
+                    if not isinstance(item, dict):
+                        continue
+
+                    target = str(item.get("final_url") or item.get("requested_target") or "").strip()
+                    if not target:
+                        continue
+
+                    refs = [
+                        f"browser_surface.cookies={item.get('cookie_count', 0)}",
+                        f"browser_surface.auth_cookies={item.get('auth_cookie_count', 0)}",
+                        f"browser_surface.auth_storage_keys={item.get('auth_storage_key_count', 0)}",
+                    ]
+                    if item.get("notes"):
+                        refs.append(f"browser_surface.notes={item.get('notes')}")
+
+                    index.setdefault(target, []).extend(refs)
+
+            if isinstance(hypotheses, list):
+                for item in hypotheses:
+                    if not isinstance(item, dict):
+                        continue
+
+                    affected = item.get("affected_surfaces", [])
+                    hypothesis_id = str(item.get("hypothesis_id", "")).strip()
+                    title = str(item.get("title", "")).strip()
+                    if not hypothesis_id or not isinstance(affected, list):
+                        continue
+
+                    ref = f"browser_hypothesis={hypothesis_id}:{title}"
+                    for target in affected:
+                        normalized = str(target).strip()
+                        if normalized:
+                            index.setdefault(normalized, []).append(ref)
+
+        if isinstance(session_surface_compare, dict):
+            surfaces = session_surface_compare.get("surfaces", [])
+            hypotheses = session_surface_compare.get("hypotheses", [])
+
+            if isinstance(surfaces, list):
+                for item in surfaces:
+                    if not isinstance(item, dict):
+                        continue
+
+                    target = str(item.get("final_url") or item.get("requested_target") or "").strip()
+                    if not target:
+                        continue
+
+                    refs = [
+                        f"session_surface.set_cookie_headers={item.get('set_cookie_count', 0)}",
+                        f"session_surface.auth_cookies={item.get('auth_cookie_count', 0)}",
+                        f"session_surface.issue_count={item.get('issue_count', 0)}",
+                        f"session_surface.redirect_hops={item.get('redirect_hop_count', 0)}",
+                    ]
+                    index.setdefault(target, []).extend(refs)
+
+            if isinstance(hypotheses, list):
+                for item in hypotheses:
+                    if not isinstance(item, dict):
+                        continue
+
+                    affected = item.get("affected_surfaces", [])
+                    hypothesis_id = str(item.get("hypothesis_id", "")).strip()
+                    title = str(item.get("title", "")).strip()
+                    if not hypothesis_id or not isinstance(affected, list):
+                        continue
+
+                    ref = f"session_hypothesis={hypothesis_id}:{title}"
+                    for target in affected:
+                        normalized = str(target).strip()
+                        if normalized:
+                            index.setdefault(normalized, []).append(ref)
+
+        for target, values in list(index.items()):
+            deduped: list[str] = []
+            for value in values:
+                if value not in deduped:
+                    deduped.append(value)
+            index[target] = deduped
 
         return index
 
@@ -315,6 +420,15 @@ class EvidencePackBuilder:
                 lines.append("```text")
                 lines.append(str(sample)[:900])
                 lines.append("```")
+                lines.append("")
+
+            passive_signal_summary = item.get("passive_signal_summary", [])
+
+            if passive_signal_summary:
+                lines.append("**Passive Signal Summary**")
+                lines.append("")
+                for ref in passive_signal_summary:
+                    lines.append(f"- `{ref}`")
                 lines.append("")
 
             steps = item.get("safe_next_steps", [])

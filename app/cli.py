@@ -784,6 +784,174 @@ def command_session_surface_compare(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_surface_recon(args: argparse.Namespace) -> int:
+    scope = load_scope(args.profile)
+    if len(args.targets) < 2:
+        print_fail("Surface recon requires at least two in-scope targets.")
+        return 1
+
+    normalized_targets: list[str] = []
+    scope_results: list[dict] = []
+
+    for target in args.targets:
+        allowed, result = validate_target_or_fail(
+            scope,
+            target,
+            "Surface recon",
+            require_authorization=True,
+        )
+        if not allowed:
+            return 1
+        normalized_targets.append(result["normalized_url"])
+        scope_results.append(result)
+
+    ctx = create_safe_run(scope, normalized_targets[0])
+    logger = create_run_logger(ctx.run_dir)
+    ctx.update_status("running_surface_recon", "Surface recon started.")
+
+    logger.info("Surface recon initialized.")
+    logger.info(f"Profile: {ctx.profile_name}")
+    logger.info(f"Compared targets: {normalized_targets}")
+    logger.info(f"Browser compare requested: {args.with_browser}")
+
+    write_scope_artifacts(ctx, scope, scope_results[0])
+    ctx.write_json("parsed/surface_recon_scope_targets.json", scope_results)
+
+    preflight = run_step(
+        "Running surface recon preflight",
+        lambda: PreflightChecker(scope=scope, run_dir=ctx.run_dir).run(normalized_targets[0]),
+        "Surface recon preflight completed",
+    )
+    if not preflight.ready:
+        return fail_run(
+            ctx=ctx,
+            logger=logger,
+            message=(
+                "Surface recon preflight failed. "
+                f"Blocking issues: {preflight.blocking_issues}"
+            ),
+            status="failed_preflight",
+            data=preflight.to_dict(),
+        )
+
+    session_summary = run_step(
+        "Comparing HTTP session surfaces",
+        lambda: SessionSurfaceCompareRunner(scope=scope, run_context=ctx).run(normalized_targets),
+        "HTTP session surface comparison completed",
+    )
+
+    browser_summary = None
+    if args.with_browser:
+        if not scope.config.rules.allow_browser_crawl:
+            return fail_run(
+                ctx=ctx,
+                logger=logger,
+                message="Surface recon browser phase blocked because browser-based actions are disabled in the selected profile.",
+                status="failed_browser_policy_gate",
+            )
+
+        if scope.requires_manual_approval("browser_screenshots") and not args.manual_approval:
+            return fail_run(
+                ctx=ctx,
+                logger=logger,
+                message=(
+                    "Surface recon browser phase requires explicit manual approval. "
+                    "Re-run with `--manual-approval` after confirming the policy and targets are safe for read-only browser analysis."
+                ),
+                status="failed_browser_manual_approval",
+            )
+
+        runtime_check = check_browser_runtime()
+        if not runtime_check.available:
+            return fail_run(
+                ctx=ctx,
+                logger=logger,
+                message=runtime_check.message,
+                status="failed_browser_runtime",
+            )
+
+        browser_summary = run_step(
+            "Comparing browser surfaces",
+            lambda: BrowserSurfaceCompareRunner(scope=scope, run_context=ctx).run(
+                normalized_targets,
+                timeout_ms=args.timeout_ms,
+            ),
+            "Browser surface comparison completed",
+        )
+
+    normalizer = FindingNormalizer(ctx.run_dir)
+    findings = run_step("Normalizing findings", normalizer.normalize, "Findings normalized")
+
+    triage = TriageEngine(ctx.run_dir)
+    candidates = run_step("Building triage candidates", triage.triage, "Triage candidates built")
+
+    planner = ValidationPlanner(ctx.run_dir)
+    validation_summary = run_step("Creating validation plan", planner.build_plan, "Validation plan created")
+
+    ranker = CandidateRanker(ctx.run_dir)
+    ranked_summary = run_step("Ranking candidates", ranker.rank, "Candidate ranking completed")
+
+    queue_builder = ReviewQueueBuilder(ctx.run_dir)
+    queue_summary = run_step(
+        "Building review queue",
+        lambda: queue_builder.build(
+            max_start_now=args.max_start_now,
+            max_manual_review=args.max_manual_review,
+            max_review_later=args.max_review_later,
+            max_recon_backlog=args.max_recon_backlog,
+            max_noise=args.max_noise,
+        ),
+        "Review queue generated",
+    )
+
+    evidence_summary = run_step(
+        "Building evidence pack",
+        lambda: EvidencePackBuilder(ctx.run_dir).build(),
+        "Evidence pack generated",
+    )
+    final_report_summary = run_step(
+        "Drafting final report",
+        lambda: FinalReportComposer(ctx.run_dir).build(),
+        "Final report draft generated",
+    )
+    report_path = run_step(
+        "Generating general report",
+        lambda: ReportGenerator(ctx.run_dir).generate(),
+        "General report generated",
+    )
+    index_summary = run_step(
+        "Updating artifact dashboard",
+        lambda: ArtifactIndexBuilder(ctx.run_dir).build(),
+        "Artifact dashboard updated",
+    )
+
+    ctx.update_status("completed", "Surface recon completed successfully.")
+
+    print_ok("Surface recon completed.")
+    print_info(f"Profile: {ctx.profile_name}")
+    print_info(f"Program: {ctx.program_name}")
+    print_info(f"Compared surfaces: {session_summary.compared_surface_count}")
+    print_info(f"HTTP hypotheses: {session_summary.hypothesis_count}")
+    if browser_summary is not None:
+        print_info(f"Browser hypotheses: {browser_summary.hypothesis_count}")
+        print_info(f"Browser failed surfaces: {browser_summary.failed_surface_count}")
+    else:
+        print_info("Browser phase: skipped")
+    print_info(f"Normalized findings: {len(findings)}")
+    print_info(f"Triage candidates: {len(candidates)}")
+    print_info(f"Validation items: {validation_summary.total_items}")
+    print_info(f"Ranked candidates: {ranked_summary.total_ranked}")
+    print_info(f"Manual review ranked: {ranked_summary.manual_review_count}")
+    print_info(f"Evidence pack items: {evidence_summary.total_items}")
+    print_info(f"Final report items: {final_report_summary.report_draft_items}")
+    print_info(f"Run directory: {ctx.run_dir}")
+    print_info(f"Report file: {report_path}")
+    print_info(f"Review queue file: {queue_summary.queue_markdown_path}")
+    print_info(f"Dashboard file: {index_summary.index_markdown_path}")
+
+    return 0
+
+
 def command_crawl(args: argparse.Namespace) -> int:
     scope = load_scope(args.profile)
     allowed, result = validate_target_or_fail(
@@ -2102,6 +2270,39 @@ def build_parser() -> argparse.ArgumentParser:
         help="Two or more in-scope target URLs to compare",
     )
     session_surface_parser.set_defaults(func=command_session_surface_compare)
+
+    surface_recon_parser = subparsers.add_parser(
+        "surface-recon",
+        help="Run fast multi-surface passive recon in a single run and build review artifacts",
+    )
+    add_profile_argument(surface_recon_parser)
+    surface_recon_parser.add_argument(
+        "targets",
+        nargs="+",
+        help="Two or more in-scope target URLs to compare in one run",
+    )
+    surface_recon_parser.add_argument(
+        "--with-browser",
+        action="store_true",
+        help="Also run read-only browser surface comparison in the same run",
+    )
+    surface_recon_parser.add_argument(
+        "--manual-approval",
+        action="store_true",
+        help="Required when the browser phase is requested and policy marks browser actions as manual approval",
+    )
+    surface_recon_parser.add_argument(
+        "--timeout-ms",
+        type=int,
+        default=15000,
+        help="Per-page browser timeout in milliseconds for the optional browser phase",
+    )
+    surface_recon_parser.add_argument("--max-start-now", type=int, default=10, help="Maximum Start Now queue items")
+    surface_recon_parser.add_argument("--max-manual-review", type=int, default=20, help="Maximum Manual Review queue items")
+    surface_recon_parser.add_argument("--max-review-later", type=int, default=20, help="Maximum Review Later queue items")
+    surface_recon_parser.add_argument("--max-recon-backlog", type=int, default=20, help="Maximum Recon Backlog queue items")
+    surface_recon_parser.add_argument("--max-noise", type=int, default=20, help="Maximum Likely Noise queue items")
+    surface_recon_parser.set_defaults(func=command_surface_recon)
 
     browser_surface_parser = subparsers.add_parser(
         "browser-surface-compare",

@@ -49,6 +49,7 @@ class ValidationPlanner:
         run_data = self._read_json(self.run_dir / "run.json")
         endpoint_validation = self._read_json(self.parsed_dir / "endpoint_validation.json")
         js_analysis = self._read_json(self.parsed_dir / "js_analysis.json")
+        session_surface_compare = self._read_json(self.parsed_dir / "session_surface_compare.json")
         browser_surface_compare = self._read_json(self.parsed_dir / "browser_surface_compare.json")
         triage_candidates = self._read_json(self.parsed_dir / "triage_candidates.json")
 
@@ -61,6 +62,9 @@ class ValidationPlanner:
 
         if isinstance(js_analysis, dict):
             items.extend(self._items_from_js_analysis(js_analysis))
+
+        if isinstance(session_surface_compare, dict):
+            items.extend(self._items_from_session_surface_compare(session_surface_compare))
 
         if isinstance(browser_surface_compare, dict):
             items.extend(self._items_from_browser_surface_compare(browser_surface_compare))
@@ -294,6 +298,91 @@ class ValidationPlanner:
 
         return items
 
+    def _items_from_session_surface_compare(self, session_surface_compare: dict) -> list[ValidationPlanItem]:
+        hypotheses = session_surface_compare.get("hypotheses", [])
+        items: list[ValidationPlanItem] = []
+
+        if not isinstance(hypotheses, list):
+            return items
+
+        for item in hypotheses:
+            hypothesis_id = str(item.get("hypothesis_id", "unknown"))
+            severity = str(item.get("severity", "medium")).lower()
+            title = str(item.get("title", "Session surface hypothesis"))
+            rationale = str(item.get("rationale", ""))
+            affected_surfaces = item.get("affected_surfaces", [])
+            supporting_signals = item.get("supporting_signals", [])
+            safe_next_steps = item.get("safe_next_steps", [])
+
+            target = "unknown"
+            if isinstance(affected_surfaces, list) and affected_surfaces:
+                target = str(affected_surfaces[0])
+
+            lowered_title = title.lower()
+            if "cross-host redirect" in lowered_title:
+                category = "cross_host_session_bootstrap_review"
+            elif "without secure" in lowered_title:
+                category = "cookie_attribute_policy_review"
+            elif "domain scope" in lowered_title:
+                category = "cookie_scope_variance_review"
+            elif "samesite policy" in lowered_title:
+                category = "cookie_samesite_variance_review"
+            else:
+                category = "anonymous_session_bootstrap_review"
+
+            priority_map = {
+                "high": "high",
+                "medium": "high",
+                "low": "medium",
+            }
+            priority = priority_map.get(severity, "medium")
+
+            items.append(
+                ValidationPlanItem(
+                    item_id=self._make_id("session-surface", hypothesis_id, target),
+                    priority=priority,
+                    reportability="needs_manual_validation",
+                    category=category,
+                    target=target,
+                    source="session_surface_compare",
+                    reason=title,
+                    safe_validation_steps=(
+                        safe_next_steps
+                        if isinstance(safe_next_steps, list) and safe_next_steps
+                        else [
+                            "Repeat this comparison with low-rate read-only requests only.",
+                            "Review whether the cookie or redirect behavior is stable across anonymous surfaces.",
+                            "Do not attempt active session manipulation unless the program policy explicitly allows it.",
+                        ]
+                    ),
+                    manual_approval_required=True,
+                    evidence_refs=self._session_surface_evidence_refs(
+                        hypothesis_id=hypothesis_id,
+                        severity=severity,
+                        supporting_signals=supporting_signals,
+                    ),
+                    notes=rationale,
+                )
+            )
+
+        return items
+
+    def _session_surface_evidence_refs(
+        self,
+        hypothesis_id: str,
+        severity: str,
+        supporting_signals: list | object,
+    ) -> list[str]:
+        refs = [
+            f"hypothesis_id={hypothesis_id}",
+            f"severity={severity}",
+        ]
+
+        if isinstance(supporting_signals, list):
+            refs.extend(str(signal) for signal in supporting_signals)
+
+        return refs
+
     def _items_from_js_analysis(self, js_analysis: dict) -> list[ValidationPlanItem]:
         assets = js_analysis.get("assets", [])
         items: list[ValidationPlanItem] = []
@@ -458,7 +547,8 @@ class ValidationPlanner:
 
         for candidate in triage_candidates:
             priority = str(candidate.get("priority", "low"))
-            category = str(candidate.get("category", "unknown"))
+            original_category = str(candidate.get("category", "unknown"))
+            category = self._canonical_triage_category(original_category)
             target = str(candidate.get("target", "unknown"))
             manual = candidate.get("requires_manual_approval") is True
 
@@ -470,15 +560,11 @@ class ValidationPlanner:
                     item_id=self._make_id("triage-high-priority", category, target),
                     priority=priority,
                     reportability="needs_manual_validation",
-                    category=f"triage_{category}",
+                    category=category,
                     target=target,
                     source="triage_candidates",
                     reason=str(candidate.get("reason", "High-priority triage candidate.")),
-                    safe_validation_steps=[
-                        "Review this triage candidate manually.",
-                        "Check whether endpoint validation already confirmed reachability.",
-                        "Do not run active exploit checks without explicit permission.",
-                    ],
+                    safe_validation_steps=self._triage_safe_validation_steps(original_category),
                     manual_approval_required=manual,
                     evidence_refs=[
                         f"candidate_id={candidate.get('candidate_id', 'unknown')}",
@@ -488,6 +574,39 @@ class ValidationPlanner:
             )
 
         return items
+
+    def _canonical_triage_category(self, category: str) -> str:
+        mappings = {
+            "browser_session_bootstrap_review": "browser_cookie_bootstrap_review",
+            "browser_storage_policy_review": "browser_storage_session_review",
+            "cross_surface_session_bootstrap_review": "cross_surface_cookie_scope_review",
+            "anonymous_session_bootstrap_review": "anonymous_session_bootstrap_review",
+            "cross_host_session_bootstrap_review": "cross_host_session_bootstrap_review",
+            "cookie_attribute_policy_review": "cookie_attribute_policy_review",
+            "cookie_scope_variance_review": "cookie_scope_variance_review",
+            "cookie_samesite_variance_review": "cookie_samesite_variance_review",
+        }
+
+        return mappings.get(category, f"triage_{category}")
+
+    def _triage_safe_validation_steps(self, category: str) -> list[str]:
+        if category in {
+            "browser_session_bootstrap_review",
+            "browser_storage_policy_review",
+            "cross_surface_session_bootstrap_review",
+            "anonymous_session_bootstrap_review",
+            "cross_host_session_bootstrap_review",
+            "cookie_attribute_policy_review",
+            "cookie_scope_variance_review",
+            "cookie_samesite_variance_review",
+        }:
+            return []
+
+        return [
+            "Review this triage candidate manually.",
+            "Check whether endpoint validation already confirmed reachability.",
+            "Do not run active exploit checks without explicit permission.",
+        ]
 
     def _deduplicate(self, items: list[ValidationPlanItem]) -> list[ValidationPlanItem]:
         merged: dict[str, ValidationPlanItem] = {}
@@ -502,6 +621,7 @@ class ValidationPlanner:
             existing = merged[key]
             existing.evidence_refs = sorted(set(existing.evidence_refs + item.evidence_refs))
             existing.safe_validation_steps = self._merge_lists(existing.safe_validation_steps, item.safe_validation_steps)
+            existing.notes = self._merge_text(existing.notes, item.notes)
 
             if self._priority_score(item.priority) > self._priority_score(existing.priority):
                 existing.priority = item.priority
@@ -518,6 +638,24 @@ class ValidationPlanner:
                 merged.append(item)
 
         return merged
+
+    def _merge_text(self, left: str, right: str) -> str:
+        left = left.strip()
+        right = right.strip()
+
+        if not left:
+            return right
+
+        if not right or right == left:
+            return left
+
+        if left in right:
+            return right
+
+        if right in left:
+            return left
+
+        return f"{left} | {right}"
 
     def _priority_score(self, priority: str) -> int:
         scores = {

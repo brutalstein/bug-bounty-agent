@@ -197,6 +197,9 @@ class CandidateRanker:
         if source == "browser_surface_compare":
             score += 10
 
+        if source == "session_surface_compare":
+            score += 9
+
         if source == "js_analysis":
             score -= 4
 
@@ -208,6 +211,15 @@ class CandidateRanker:
 
         if "auth_cookie_count=" in evidence_blob:
             score += 6
+
+        if "cross_host_redirect_count=" in evidence_blob:
+            score += 8
+
+        if "domains=" in evidence_blob:
+            score += 4
+
+        if "samesite=" in evidence_blob:
+            score += 3
 
         return max(0, score)
 
@@ -257,6 +269,15 @@ class CandidateRanker:
 
         if "authentication" in category:
             score += 10
+
+        if "cross_host" in category:
+            score += 8
+
+        if "cookie_attribute" in category:
+            score += 5
+
+        if "cookie_scope" in category or "samesite" in category:
+            score += 4
 
         if "reachable_api_mapping" in category:
             score += 3
