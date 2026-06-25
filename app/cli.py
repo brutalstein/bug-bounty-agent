@@ -9,6 +9,7 @@ from core.artifact_index import ArtifactIndexBuilder
 from core.auth_session import AuthenticatedSessionManager
 from core.authenticated_crawl import AuthenticatedCrawlRunner
 from core.browser_evidence import BrowserEvidenceBuilder, check_browser_runtime
+from core.browser_surface_compare import BrowserSurfaceCompareRunner
 from core.console import ConsoleSpinner, print_banner, print_status
 from core.lab_manager import LabManager
 from core.policy_fetcher import PolicyFetcher
@@ -30,6 +31,7 @@ from core.review_queue import ReviewQueueBuilder
 from core.evidence_pack import EvidencePackBuilder
 from core.final_report import FinalReportComposer
 from core.report_generator import ReportGenerator
+from core.session_surface_compare import SessionSurfaceCompareRunner
 from core.session_compare import SessionCompareRunner
 from tools.recon_tools import ReconTools
 from tools.crawl_tools import CrawlTools
@@ -75,11 +77,39 @@ def load_scope(profile_name: str | None = None) -> ScopeManager:
     return ScopeManager(str(PROJECT_ROOT / "configs" / "scope.yaml"), profile_name=profile_name)
 
 
+def resolve_session_profile_name(scope: ScopeManager, requested_name: str | None) -> str:
+    if requested_name:
+        return requested_name
+
+    profiles = scope.list_session_profiles()
+    if not profiles:
+        raise ValueError(
+            f"No session profiles are configured for `{scope.config.profile_name}`."
+        )
+
+    return str(profiles[0]["name"])
+
+
+def resolve_quick_scan_nmap_skip_reason(scope: ScopeManager, target: str) -> str | None:
+    if not scope.config.rules.allow_port_scan:
+        return "Port scanning is disabled for the selected profile."
+
+    try:
+        scope.assert_port_scan_allowed(target)
+    except PermissionError as error:
+        return str(error)
+
+    if scope.requires_manual_approval("port_scanning"):
+        return "Port scanning is marked as a manual-approval area for the selected profile."
+
+    return None
+
+
 def create_safe_run(scope: ScopeManager, normalized_url: str) -> RunContext:
     return create_run_context(
         target_name=scope.config.target_name,
         target_url=normalized_url,
-        mode=scope.config.mode,
+        mode=scope.effective_mode(),
         profile_name=scope.config.profile_name,
         program_name=scope.config.policy.program_name,
         program_url=scope.config.policy.program_url,
@@ -209,9 +239,12 @@ def command_doctor(_: argparse.Namespace) -> int:
         PROJECT_ROOT / "core" / "final_report.py",
         PROJECT_ROOT / "core" / "report_generator.py",
         PROJECT_ROOT / "core" / "artifact_index.py",
+        PROJECT_ROOT / "core" / "session_signals.py",
+        PROJECT_ROOT / "core" / "session_surface_compare.py",
         PROJECT_ROOT / "core" / "auth_session.py",
         PROJECT_ROOT / "core" / "authenticated_crawl.py",
         PROJECT_ROOT / "core" / "browser_evidence.py",
+        PROJECT_ROOT / "core" / "browser_surface_compare.py",
         PROJECT_ROOT / "core" / "console.py",
         PROJECT_ROOT / "core" / "session_compare.py",
         PROJECT_ROOT / "core" / "lab_manager.py",
@@ -255,13 +288,13 @@ def command_doctor(_: argparse.Namespace) -> int:
         scope = load_scope()
         print_ok(f"Scope config loaded: {scope.config.target_name}")
         print_ok(f"Active profile: {scope.config.profile_name}")
-        print_ok(f"Mode: {scope.config.mode}")
+        print_ok(f"Effective mode: {scope.effective_mode()}")
         print_ok(f"Base URL: {scope.config.base_url}")
         print_ok(f"Authorization confirmed: {scope.config.authorization.confirmed}")
         if scope.config.lab:
             print_ok(f"Lab container: {scope.config.lab.container_name}")
         if scope.list_session_profiles():
-            print_ok(f"Configured lab session profiles: {len(scope.list_session_profiles())}")
+            print_ok(f"Configured session profiles: {len(scope.list_session_profiles())}")
     except Exception as error:
         print_fail(f"Scope config error: {error}")
         checks_passed = False
@@ -553,7 +586,7 @@ def command_config(args: argparse.Namespace) -> int:
     print_info("Current target profile:")
     print(f"Project:      {config.project_name}")
     print(f"Profile:      {config.profile_name}")
-    print(f"Mode:         {config.mode}")
+    print(f"Mode:         {scope.effective_mode()}")
     print(f"Target name:  {config.target_name}")
     print(f"Target type:  {config.target_type}")
     print(f"Base URL:     {config.base_url}")
@@ -603,6 +636,8 @@ def command_config(args: argparse.Namespace) -> int:
             print(f"- {item['name']} ({item['role_hint'] or 'role-unspecified'})")
             print(f"  kind:      {item['kind']}")
             print(f"  login url: {item['login_url']}")
+            if item.get("token_env"):
+                print(f"  token env: {item['token_env']}")
 
     return 0
 
@@ -665,6 +700,9 @@ def command_probe(args: argparse.Namespace) -> int:
     logger.info(f"HTTP probe success: {probe_result.success}")
     logger.info(f"Status code: {probe_result.status_code}")
     logger.info(f"Title: {probe_result.title}")
+    logger.info(f"Set-Cookie count: {probe_result.set_cookie_count}")
+    logger.info(f"Redirect hops: {probe_result.redirect_hop_count}")
+    logger.info(f"Session signal issues: {probe_result.session_signal_issue_count}")
 
     if probe_result.success:
         print_ok("HTTP probe completed successfully.")
@@ -678,10 +716,72 @@ def command_probe(args: argparse.Namespace) -> int:
     print_info(f"Content type: {probe_result.content_type}")
     print_info(f"Server: {probe_result.server}")
     print_info(f"Title: {probe_result.title}")
+    print_info(f"Headers observed: {probe_result.header_count}")
+    print_info(f"Set-Cookie headers: {probe_result.set_cookie_count}")
+    print_info(f"Redirect hops: {probe_result.redirect_hop_count}")
+    print_info(f"Redirect cookies: {probe_result.redirect_cookie_count}")
+    print_info(f"Cross-host redirects: {probe_result.cross_host_redirect_count}")
+    print_info(f"Session signal issues: {probe_result.session_signal_issue_count}")
+    print_info(f"Session observations: {probe_result.session_signal_observation_count}")
     print_info(f"Response time: {probe_result.response_time_seconds}s")
     print_info(f"Run directory: {ctx.run_dir}")
 
     return 0 if probe_result.success else 1
+
+
+def command_session_surface_compare(args: argparse.Namespace) -> int:
+    scope = load_scope(args.profile)
+    if len(args.targets) < 2:
+        print_fail("Session surface compare requires at least two in-scope targets.")
+        return 1
+
+    normalized_targets: list[str] = []
+    scope_results: list[dict] = []
+
+    for target in args.targets:
+        allowed, result = validate_target_or_fail(
+            scope,
+            target,
+            "Session surface compare",
+            require_authorization=True,
+        )
+        if not allowed:
+            return 1
+        normalized_targets.append(result["normalized_url"])
+        scope_results.append(result)
+
+    ctx = create_safe_run(scope, normalized_targets[0])
+    logger = create_run_logger(ctx.run_dir)
+
+    logger.info("Session surface comparison initialized.")
+    logger.info(f"Profile: {ctx.profile_name}")
+    logger.info(f"Compared targets: {normalized_targets}")
+
+    write_scope_artifacts(ctx, scope, scope_results[0])
+    ctx.write_json("parsed/session_surface_scope_targets.json", scope_results)
+
+    runner = SessionSurfaceCompareRunner(scope=scope, run_context=ctx)
+    summary = run_step(
+        "Comparing session surfaces",
+        lambda: runner.run(normalized_targets),
+        "Session surface comparison completed",
+    )
+    dashboard_path = build_dashboard_safely(ctx.run_dir)
+    ctx.update_status("completed", "Session surface comparison completed successfully.")
+
+    print_ok("Session surface comparison completed.")
+    print_info(f"Profile: {ctx.profile_name}")
+    print_info(f"Compared surfaces: {summary.compared_surface_count}")
+    print_info(f"Total issues: {summary.total_issue_count}")
+    print_info(f"Total auth-like cookies: {summary.total_auth_cookie_count}")
+    print_info(f"Hypotheses: {summary.hypothesis_count}")
+    print_info(f"JSON: {summary.json_path}")
+    print_info(f"Markdown: {summary.markdown_path}")
+    print_info(f"Run directory: {ctx.run_dir}")
+    if dashboard_path:
+        print_info(f"Dashboard file: {dashboard_path}")
+
+    return 0
 
 
 def command_crawl(args: argparse.Namespace) -> int:
@@ -911,11 +1011,17 @@ def command_nmap_scan(args: argparse.Namespace) -> int:
     write_scope_artifacts(ctx, scope, result)
 
     scanner = NmapTools(scope=scope, run_context=ctx)
+    if not scanner.is_available():
+        print_fail("Safe nmap scan blocked: `nmap` is not installed on this system.")
+        print_info("Install Nmap first, then re-run this command against a profile that explicitly allows port scanning.")
+        return 1
+
+    ports = scanner.suggested_ports(result["normalized_url"], args.ports)
     summary = run_step(
         "Running safe nmap scan",
         lambda: scanner.run_safe_port_scan(
             target=result["normalized_url"],
-            ports=args.ports,
+            ports=ports,
             timeout_seconds=args.scan_timeout,
         ),
         "Safe nmap scan completed",
@@ -977,9 +1083,12 @@ def command_js_analyze_run(args: argparse.Namespace) -> int:
 
     print_ok("JavaScript analysis completed.")
     print_info(f"Analyzed assets: {summary.analyzed_assets}")
+    print_info(f"Analyzed inline docs: {summary.analyzed_inline_documents}")
     print_info(f"Discovered paths: {summary.total_discovered_paths}")
+    print_info(f"In-scope full URLs: {summary.total_in_scope_full_urls}")
     print_info(f"Source maps: {summary.total_source_maps}")
     print_info(f"Interesting keywords: {summary.total_interesting_keywords}")
+    print_info(f"Config signals: {summary.total_config_signals}")
     print_info(f"Output file: {analyzer.output_path}")
 
     return 0
@@ -1138,6 +1247,7 @@ def command_browser_evidence_run(args: argparse.Namespace) -> int:
     ctx = load_run_context(run_dir)
     scope = load_scope(ctx.profile_name)
     explanation = scope.explain(ctx.target_url)
+    session_profile_name = resolve_session_profile_name(scope, args.session_profile)
 
     if not explanation["allowed"]:
         print_fail("Browser evidence run blocked because the stored run target is now out of scope.")
@@ -1237,6 +1347,78 @@ def command_browser_evidence_run(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_browser_surface_compare(args: argparse.Namespace) -> int:
+    scope = load_scope(args.profile)
+    if len(args.targets) < 2:
+        print_fail("Browser surface compare requires at least two in-scope targets.")
+        return 1
+
+    normalized_targets: list[str] = []
+    scope_results: list[dict] = []
+
+    for target in args.targets:
+        allowed, result = validate_target_or_fail(
+            scope,
+            target,
+            "Browser surface compare",
+            require_authorization=True,
+        )
+        if not allowed:
+            return 1
+        normalized_targets.append(result["normalized_url"])
+        scope_results.append(result)
+
+    if not scope.config.rules.allow_browser_crawl:
+        print_fail("Browser surface compare blocked because browser-based actions are disabled in the selected profile.")
+        return 1
+
+    if scope.requires_manual_approval("browser_screenshots") and not args.manual_approval:
+        print_fail(
+            "Browser surface compare requires explicit manual approval. "
+            "Re-run with `--manual-approval` after confirming the policy and target are safe for read-only browser analysis."
+        )
+        return 1
+
+    runtime_check = check_browser_runtime()
+    if not runtime_check.available:
+        print_fail(runtime_check.message)
+        return 1
+
+    ctx = create_safe_run(scope, normalized_targets[0])
+    logger = create_run_logger(ctx.run_dir)
+    logger.info("Browser surface comparison initialized.")
+    logger.info(f"Profile: {ctx.profile_name}")
+    logger.info(f"Compared targets: {normalized_targets}")
+
+    write_scope_artifacts(ctx, scope, scope_results[0])
+    ctx.write_json("parsed/browser_surface_scope_targets.json", scope_results)
+
+    runner = BrowserSurfaceCompareRunner(scope=scope, run_context=ctx)
+    summary = run_step(
+        "Comparing browser surfaces",
+        lambda: runner.run(normalized_targets, timeout_ms=args.timeout_ms),
+        "Browser surface comparison completed",
+    )
+    dashboard_path = build_dashboard_safely(ctx.run_dir)
+    ctx.update_status("completed", "Browser surface comparison completed successfully.")
+
+    print_ok("Browser surface comparison completed.")
+    print_info(f"Profile: {ctx.profile_name}")
+    print_info(f"Compared surfaces: {summary.compared_surface_count}")
+    print_info(f"Failed surfaces: {summary.failed_surface_count}")
+    print_info(f"Total cookies: {summary.total_cookie_count}")
+    print_info(f"Total auth-like cookies: {summary.total_auth_cookie_count}")
+    print_info(f"Total auth-like storage keys: {summary.total_auth_storage_key_count}")
+    print_info(f"Hypotheses: {summary.hypothesis_count}")
+    print_info(f"JSON: {summary.json_path}")
+    print_info(f"Markdown: {summary.markdown_path}")
+    print_info(f"Run directory: {ctx.run_dir}")
+    if dashboard_path:
+        print_info(f"Dashboard file: {dashboard_path}")
+
+    return 0
+
+
 def command_authenticated_crawl(args: argparse.Namespace) -> int:
     scope = load_scope(args.profile)
     allowed, result = validate_target_or_fail(
@@ -1252,18 +1434,19 @@ def command_authenticated_crawl(args: argparse.Namespace) -> int:
     if scope.requires_manual_approval("authenticated_crawl") and not args.manual_approval:
         print_fail(
             "Authenticated crawl requires explicit manual approval. "
-            "Re-run with `--manual-approval` after confirming the lab account and program policy are appropriate."
+            "Re-run with `--manual-approval` after confirming the test account or token material and program policy are appropriate."
         )
         return 1
 
     ctx = create_safe_run(scope, result["normalized_url"])
     logger = create_run_logger(ctx.run_dir)
     ctx.update_status("running_authenticated_crawl", "Authenticated crawl started.")
+    session_profile_name = resolve_session_profile_name(scope, args.session_profile)
 
     logger.info("Authenticated crawl initialized.")
     logger.info(f"Profile: {ctx.profile_name}")
     logger.info(f"Target: {ctx.target_url}")
-    logger.info(f"Session profile: {args.session_profile}")
+    logger.info(f"Session profile: {session_profile_name}")
 
     write_scope_artifacts(ctx, scope, result)
 
@@ -1285,7 +1468,7 @@ def command_authenticated_crawl(args: argparse.Namespace) -> int:
         session = run_step(
             "Bootstrapping authenticated session",
             lambda: session_manager.login(
-                session_profile_name=args.session_profile,
+                session_profile_name=session_profile_name,
                 manual_approval=args.manual_approval,
             ),
             "Authenticated session ready",
@@ -1363,7 +1546,7 @@ def command_session_compare_run(args: argparse.Namespace) -> int:
     if scope.requires_manual_approval("authenticated_crawl") and not args.manual_approval:
         print_fail(
             "Session compare run requires explicit manual approval. "
-            "Re-run with `--manual-approval` after confirming the lab account and policy are appropriate."
+            "Re-run with `--manual-approval` after confirming the test account or token material and policy are appropriate."
         )
         return 1
 
@@ -1384,12 +1567,13 @@ def command_session_compare_run(args: argparse.Namespace) -> int:
     if not (run_dir / "parsed" / "scope_check.json").exists():
         ctx.write_json("parsed/scope_check.json", explanation)
 
+    session_profile_name = resolve_session_profile_name(scope, args.session_profile)
     session_manager = AuthenticatedSessionManager(scope=scope, run_context=ctx)
     try:
         session = run_step(
             "Bootstrapping authenticated session",
             lambda: session_manager.login(
-                session_profile_name=args.session_profile,
+                session_profile_name=session_profile_name,
                 manual_approval=args.manual_approval,
             ),
             "Authenticated session ready",
@@ -1574,6 +1758,33 @@ def command_quick_scan(args: argparse.Namespace) -> int:
         )
 
     pd_tools = ProjectDiscoveryTools(scope=scope, run_context=ctx)
+    nmap_summary = None
+    nmap_skip_reason = resolve_quick_scan_nmap_skip_reason(scope, result["normalized_url"])
+    nmap_scanner = NmapTools(scope=scope, run_context=ctx)
+
+    if nmap_skip_reason is None and not nmap_scanner.is_available():
+        nmap_skip_reason = "Nmap is not installed on this system."
+
+    if nmap_skip_reason is None:
+        nmap_ports = nmap_scanner.suggested_ports(result["normalized_url"])
+        nmap_summary = run_step(
+            "Running safe nmap scan",
+            lambda: nmap_scanner.run_safe_port_scan(
+                target=result["normalized_url"],
+                ports=nmap_ports,
+                timeout_seconds=max(args.scan_timeout, 120),
+            ),
+            "Safe nmap scan completed",
+        )
+        logger.info(f"Nmap success: {nmap_summary.success}")
+        logger.info(f"Nmap open ports: {nmap_summary.open_port_count}")
+    else:
+        ctx.add_event(
+            event_type="nmap_scan_skipped",
+            message="Safe nmap scan skipped during quick scan.",
+            data={"reason": nmap_skip_reason},
+        )
+        logger.info(f"Nmap skipped: {nmap_skip_reason}")
 
     httpx_result = run_step(
         "Running httpx",
@@ -1682,8 +1893,14 @@ def command_quick_scan(args: argparse.Namespace) -> int:
     ctx.update_status("completed", "Quick scan workflow completed successfully.")
 
     logger.info(f"Normalized findings: {len(findings)}")
+    logger.info(f"Nmap executed: {nmap_summary is not None}")
+    logger.info(f"Session signal issues: {probe_result.session_signal_issue_count}")
+    logger.info(f"Set-Cookie count: {probe_result.set_cookie_count}")
+    logger.info(f"Redirect hops: {probe_result.redirect_hop_count}")
     logger.info(f"JS analyzed assets: {js_summary.analyzed_assets}")
+    logger.info(f"JS analyzed inline docs: {js_summary.analyzed_inline_documents}")
     logger.info(f"JS discovered paths: {js_summary.total_discovered_paths}")
+    logger.info(f"JS in-scope full URLs: {js_summary.total_in_scope_full_urls}")
     logger.info(f"Endpoint tested count: {endpoint_summary.tested_count}")
     logger.info(f"Endpoint interesting count: {endpoint_summary.interesting_count}")
     logger.info(f"Endpoint exposure signals: {endpoint_summary.exposure_likely_count}")
@@ -1702,14 +1919,29 @@ def command_quick_scan(args: argparse.Namespace) -> int:
     print_info(f"Profile: {ctx.profile_name}")
     print_info(f"Program: {ctx.program_name}")
     print_info(f"Probe success: {probe_result.success}")
+    print_info(f"Nmap executed: {nmap_summary is not None}")
+    print_info(f"Set-Cookie headers: {probe_result.set_cookie_count}")
+    print_info(f"Redirect hops: {probe_result.redirect_hop_count}")
+    print_info(f"Redirect cookies: {probe_result.redirect_cookie_count}")
+    print_info(f"Cross-host redirects: {probe_result.cross_host_redirect_count}")
+    print_info(f"Session signal issues: {probe_result.session_signal_issue_count}")
+    print_info(f"Session observations: {probe_result.session_signal_observation_count}")
+    if nmap_summary is not None:
+        print_info(f"Nmap success: {nmap_summary.success}")
+        print_info(f"Nmap open port count: {nmap_summary.open_port_count}")
+    elif nmap_skip_reason:
+        print_info(f"Nmap skipped: {nmap_skip_reason}")
     print_info(f"httpx success: {httpx_result.success}")
     print_info(f"Katana success: {katana_result.success}")
     print_info(f"Nuclei success: {nuclei_result.success}")
     print_info(f"Normalized findings: {len(findings)}")
     print_info(f"JS analyzed assets: {js_summary.analyzed_assets}")
+    print_info(f"JS analyzed inline docs: {js_summary.analyzed_inline_documents}")
     print_info(f"JS discovered paths: {js_summary.total_discovered_paths}")
+    print_info(f"JS in-scope full URLs: {js_summary.total_in_scope_full_urls}")
     print_info(f"JS source maps: {js_summary.total_source_maps}")
     print_info(f"JS interesting keywords: {js_summary.total_interesting_keywords}")
+    print_info(f"JS config signals: {js_summary.total_config_signals}")
     print_info(f"Endpoint tested count: {endpoint_summary.tested_count}")
     print_info(f"Endpoint accessible count: {endpoint_summary.accessible_count}")
     print_info(f"Endpoint interesting count: {endpoint_summary.interesting_count}")
@@ -1859,6 +2091,41 @@ def build_parser() -> argparse.ArgumentParser:
     probe_parser.add_argument("target", help="Target URL or domain")
     probe_parser.set_defaults(func=command_probe)
 
+    session_surface_parser = subparsers.add_parser(
+        "session-surface-compare",
+        help="Compare passive cookie and redirect signals across multiple in-scope surfaces",
+    )
+    add_profile_argument(session_surface_parser)
+    session_surface_parser.add_argument(
+        "targets",
+        nargs="+",
+        help="Two or more in-scope target URLs to compare",
+    )
+    session_surface_parser.set_defaults(func=command_session_surface_compare)
+
+    browser_surface_parser = subparsers.add_parser(
+        "browser-surface-compare",
+        help="Compare read-only browser state across multiple in-scope surfaces",
+    )
+    add_profile_argument(browser_surface_parser)
+    browser_surface_parser.add_argument(
+        "targets",
+        nargs="+",
+        help="Two or more in-scope target URLs to compare in isolated browser contexts",
+    )
+    browser_surface_parser.add_argument(
+        "--manual-approval",
+        action="store_true",
+        help="Required when the selected profile marks browser-based analysis as a manual-approval area",
+    )
+    browser_surface_parser.add_argument(
+        "--timeout-ms",
+        type=int,
+        default=15000,
+        help="Per-page browser timeout in milliseconds",
+    )
+    browser_surface_parser.set_defaults(func=command_browser_surface_compare)
+
     crawl_parser = subparsers.add_parser("crawl", help="Run a safe crawl against an in-scope target")
     add_profile_argument(crawl_parser)
     crawl_parser.add_argument("target", help="Target URL or domain")
@@ -1868,13 +2135,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     authenticated_crawl_parser = subparsers.add_parser(
         "authenticated-crawl",
-        help="Run a lab-only authenticated crawl using a configured session profile",
+        help="Run an authenticated crawl using a configured session profile",
     )
     add_profile_argument(authenticated_crawl_parser)
     authenticated_crawl_parser.add_argument("target", help="Target URL or domain")
     authenticated_crawl_parser.add_argument(
         "--session-profile",
-        default="juice-shop-customer",
+        default=None,
         help="Configured session profile name from configs/scope.yaml",
     )
     authenticated_crawl_parser.add_argument(
@@ -1998,7 +2265,7 @@ def build_parser() -> argparse.ArgumentParser:
     session_compare_parser.add_argument("run_dir", help="Run directory path")
     session_compare_parser.add_argument(
         "--session-profile",
-        default="juice-shop-customer",
+        default=None,
         help="Configured session profile name from configs/scope.yaml",
     )
     session_compare_parser.add_argument(

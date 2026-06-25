@@ -88,7 +88,7 @@ class ProjectDiscoveryTools:
     ) -> ProjectDiscoveryRunResult:
         self.scope.assert_action_allowed(target, method="GET")
 
-        if self.scope.config.mode != "lab":
+        if not self.scope.is_lab_profile():
             raise PermissionError("Katana is currently enabled only in lab mode.")
 
         command = [
@@ -129,7 +129,7 @@ class ProjectDiscoveryTools:
     ) -> NucleiRunResult:
         self.scope.assert_action_allowed(target, method="GET")
 
-        if self.scope.config.mode != "lab":
+        if not self.scope.is_lab_profile():
             raise PermissionError("Nuclei is currently enabled only in lab mode.")
 
         template_path = Path(template)

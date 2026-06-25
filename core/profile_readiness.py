@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass, asdict
 from pathlib import Path
 from urllib.parse import urlparse
+import os
+import shutil
 
 from core.scope import ScopeManager
 
@@ -117,6 +119,14 @@ class ProfileReadinessAssessor:
                     message="Port scanning is enabled. Keep this off unless the program policy explicitly allows it.",
                 )
             )
+            if shutil.which("nmap") is None:
+                warnings.append(
+                    ReadinessIssue(
+                        severity="warning",
+                        code="nmap_missing_for_enabled_profile",
+                        message="Port scanning is enabled, but the `nmap` executable is not currently available on this system.",
+                    )
+                )
 
         if config.rules.allow_active_scan:
             warnings.append(
@@ -183,6 +193,20 @@ class ProfileReadinessAssessor:
                 )
             else:
                 checks.append("target_in_scope")
+
+        for item in self.scope.list_session_profiles():
+            token_env = str(item.get("token_env", "")).strip()
+            if token_env and not str(os.getenv(token_env, "")).strip():
+                warnings.append(
+                    ReadinessIssue(
+                        severity="warning",
+                        code=f"session_env_missing:{item['name']}",
+                        message=(
+                            f"Session profile `{item['name']}` expects token material in `{token_env}`, "
+                            "but that environment variable is not currently set."
+                        ),
+                    )
+                )
 
         report = ProfileReadinessReport(
             profile_name=config.profile_name,

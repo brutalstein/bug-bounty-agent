@@ -42,6 +42,8 @@ class TriageEngine:
 
         candidates.extend(self._candidates_from_js_analysis())
         candidates.extend(self._candidates_from_endpoint_validation())
+        candidates.extend(self._candidates_from_session_signals())
+        candidates.extend(self._candidates_from_browser_surface_compare())
 
         deduped = self._deduplicate(candidates)
         sorted_candidates = sorted(
@@ -217,6 +219,119 @@ class TriageEngine:
                         notes="Reachable API endpoint is useful for next-stage review.",
                     )
                 )
+
+        return candidates
+
+    def _candidates_from_session_signals(self) -> list[TriageCandidate]:
+        path = self.parsed_dir / "session_signals.json"
+
+        if not path.exists():
+            return []
+
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            return []
+
+        target = str(data.get("final_url") or data.get("target") or "unknown")
+        issues = data.get("issues", [])
+        candidates: list[TriageCandidate] = []
+
+        for item in issues:
+            code = str(item.get("code", "unknown"))
+            severity = str(item.get("severity", "medium"))
+            cookie_name = str(item.get("cookie_name", "")).strip()
+            detail = str(item.get("detail", ""))
+            priority = "high" if severity == "high" else "medium"
+
+            candidates.append(
+                TriageCandidate(
+                    candidate_id=self._make_id("session-signal", f"{target}:{code}:{cookie_name}"),
+                    priority=priority,
+                    category="session_cookie_policy_review",
+                    target=target,
+                    reason=f"Passive probe observed `{code}` on a session or cookie control.",
+                    source_finding_ids=[],
+                    recommended_safe_actions=[
+                        "Re-check the behavior with a fresh read-only probe and minimal evidence capture.",
+                        "Compare the cookie or header behavior across login, logout, and public surfaces only if the policy allows it.",
+                        "Do not attempt session manipulation or active abuse without explicit policy allowance and manual approval.",
+                    ],
+                    requires_manual_approval=False,
+                    reportable_now=False,
+                    notes=f"{detail} Cookie: {cookie_name or 'n/a'}",
+                )
+            )
+
+        return candidates
+
+    def _candidates_from_browser_surface_compare(self) -> list[TriageCandidate]:
+        path = self.parsed_dir / "browser_surface_compare.json"
+
+        if not path.exists():
+            return []
+
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            return []
+
+        hypotheses = data.get("hypotheses", [])
+        candidates: list[TriageCandidate] = []
+
+        if not isinstance(hypotheses, list):
+            return candidates
+
+        for item in hypotheses:
+            hypothesis_id = str(item.get("hypothesis_id", "unknown"))
+            severity = str(item.get("severity", "medium")).lower()
+            title = str(item.get("title", "Browser surface hypothesis"))
+            rationale = str(item.get("rationale", ""))
+            affected_surfaces = item.get("affected_surfaces", [])
+            supporting_signals = item.get("supporting_signals", [])
+            safe_next_steps = item.get("safe_next_steps", [])
+
+            target = "unknown"
+            if isinstance(affected_surfaces, list) and affected_surfaces:
+                target = str(affected_surfaces[0])
+
+            lowered_title = title.lower()
+            if "storage" in lowered_title:
+                category = "browser_storage_policy_review"
+            elif "cookies persist across multiple anonymous surfaces" in lowered_title:
+                category = "cross_surface_session_bootstrap_review"
+            else:
+                category = "browser_session_bootstrap_review"
+
+            priority_map = {
+                "high": "high",
+                "medium": "high",
+                "low": "medium",
+            }
+            priority = priority_map.get(severity, "medium")
+
+            candidates.append(
+                TriageCandidate(
+                    candidate_id=self._make_id("browser-surface", hypothesis_id, target),
+                    priority=priority,
+                    category=category,
+                    target=target,
+                    reason=title,
+                    source_finding_ids=[],
+                    recommended_safe_actions=(
+                        safe_next_steps
+                        if isinstance(safe_next_steps, list) and safe_next_steps
+                        else [
+                            "Compare this passive browser state against another public surface.",
+                            "Keep the review read-only and policy-compliant.",
+                            "Do not attempt session tampering without explicit policy allowance and manual approval.",
+                        ]
+                    ),
+                    requires_manual_approval=True,
+                    reportable_now=False,
+                    notes=f"{rationale} Signals: {supporting_signals}",
+                )
+            )
 
         return candidates
 

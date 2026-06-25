@@ -33,6 +33,9 @@ class ArtifactIndexBuilder:
         scope_data = self._read_json(self.parsed_dir / "scope_check.json")
         policy_data = self._read_json(self.parsed_dir / "policy_snapshot.json")
         preflight_data = self._read_json(self.parsed_dir / "preflight_check.json")
+        session_signals = self._read_json(self.parsed_dir / "session_signals.json")
+        session_surface_compare = self._read_json(self.parsed_dir / "session_surface_compare.json")
+        browser_surface_compare = self._read_json(self.parsed_dir / "browser_surface_compare.json")
         auth_session = self._read_json(self.parsed_dir / "auth_session.json")
         authenticated_crawl = self._read_json(self.parsed_dir / "authenticated_crawl_summary.json")
         session_compare = self._read_json(self.parsed_dir / "session_compare.json")
@@ -50,6 +53,9 @@ class ArtifactIndexBuilder:
             path.name
             for path in [
                 self.reports_dir / "nmap_scan.md",
+                self.reports_dir / "session_signals.md",
+                self.reports_dir / "session_surface_compare.md",
+                self.reports_dir / "browser_surface_compare.md",
                 self.reports_dir / "review_queue.md",
                 self.reports_dir / "browser_evidence.md",
                 self.reports_dir / "authenticated_crawl.md",
@@ -70,6 +76,9 @@ class ArtifactIndexBuilder:
                 self.parsed_dir / "nmap_scan.json",
                 self.parsed_dir / "nmap_scan.xml",
                 self.parsed_dir / "preflight_check.json",
+                self.parsed_dir / "session_signals.json",
+                self.parsed_dir / "session_surface_compare.json",
+                self.parsed_dir / "browser_surface_compare.json",
                 self.parsed_dir / "auth_session.json",
                 self.parsed_dir / "authenticated_crawl_result.json",
                 self.parsed_dir / "authenticated_crawl_summary.json",
@@ -102,6 +111,9 @@ class ArtifactIndexBuilder:
             scope_data=scope_data,
             policy_data=policy_data,
             preflight_data=preflight_data,
+            session_signals=session_signals,
+            session_surface_compare=session_surface_compare,
+            browser_surface_compare=browser_surface_compare,
             auth_session=auth_session,
             authenticated_crawl=authenticated_crawl,
             session_compare=session_compare,
@@ -121,6 +133,9 @@ class ArtifactIndexBuilder:
         scope_data: dict,
         policy_data: dict,
         preflight_data: dict,
+        session_signals: dict,
+        session_surface_compare: dict,
+        browser_surface_compare: dict,
         auth_session: dict,
         authenticated_crawl: dict,
         session_compare: dict,
@@ -160,6 +175,14 @@ class ArtifactIndexBuilder:
             lines.append(f"- **Preflight Probe Success:** `{preflight_data.get('probe_success', 'unknown')}`")
             lines.append(f"- **Preflight Status Code:** `{preflight_data.get('status_code', 'unknown')}`")
             lines.append(f"- **Preflight Blocking Issues:** `{preflight_data.get('blocking_issues', [])}`")
+        if session_signals:
+            lines.append(f"- **Session Signal Issues:** `{session_signals.get('issue_count', 0)}`")
+            lines.append(f"- **Set-Cookie Headers:** `{session_signals.get('set_cookie_count', 0)}`")
+        if session_surface_compare:
+            lines.append(f"- **Session Surface Hypotheses:** `{session_surface_compare.get('hypothesis_count', 0)}`")
+        if browser_surface_compare:
+            lines.append(f"- **Browser Surface Hypotheses:** `{browser_surface_compare.get('hypothesis_count', 0)}`")
+            lines.append(f"- **Browser Surface Failures:** `{browser_surface_compare.get('failed_surface_count', 0)}`")
         if auth_session:
             lines.append(f"- **Authenticated Session Profile:** `{auth_session.get('session_profile_name', '')}`")
             lines.append(f"- **Authenticated Session Role:** `{auth_session.get('derived_role') or auth_session.get('role_hint', '')}`")
@@ -171,6 +194,8 @@ class ArtifactIndexBuilder:
         lines.append(f"- **Authenticated Crawl Only URLs:** `{authenticated_crawl.get('authenticated_only_count', 0)}`")
         lines.append(f"- **Session Compare Changed Endpoints:** `{session_compare.get('changed_count', 0)}`")
         lines.append(f"- **Session Compare Accessible After Auth:** `{session_compare.get('accessible_after_auth_count', 0)}`")
+        lines.append(f"- **Browser Surface Compared:** `{browser_surface_compare.get('compared_surface_count', 0)}`")
+        lines.append(f"- **Browser Surface Failed:** `{browser_surface_compare.get('failed_surface_count', 0)}`")
         lines.append(f"- **Browser Evidence Captured:** `{browser_evidence.get('captured_count', 0)}`")
         lines.append(f"- **Browser Evidence Failed:** `{browser_evidence.get('failed_count', 0)}`")
         lines.append(f"- **Evidence Pack Items:** `{evidence_pack.get('total_items', 0)}`")
@@ -179,6 +204,9 @@ class ArtifactIndexBuilder:
         lines.append("## Report Artifacts")
         lines.append("")
         lines.append(f"- `reports/nmap_scan.md` {'(present)' if (self.reports_dir / 'nmap_scan.md').exists() else '(missing)' }")
+        lines.append(f"- `reports/session_signals.md` {'(present)' if (self.reports_dir / 'session_signals.md').exists() else '(missing)' }")
+        lines.append(f"- `reports/session_surface_compare.md` {'(present)' if (self.reports_dir / 'session_surface_compare.md').exists() else '(missing)' }")
+        lines.append(f"- `reports/browser_surface_compare.md` {'(present)' if (self.reports_dir / 'browser_surface_compare.md').exists() else '(missing)' }")
         lines.append(f"- `reports/review_queue.md` {'(present)' if (self.reports_dir / 'review_queue.md').exists() else '(missing)' }")
         lines.append(f"- `reports/browser_evidence.md` {'(present)' if (self.reports_dir / 'browser_evidence.md').exists() else '(missing)' }")
         lines.append(f"- `reports/authenticated_crawl.md` {'(present)' if (self.reports_dir / 'authenticated_crawl.md').exists() else '(missing)' }")

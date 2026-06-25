@@ -1,19 +1,21 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, asdict
+from html import unescape
 from pathlib import Path
 from urllib.parse import urlparse
 import hashlib
 import json
 import re
 
-from core.http_client import SafeHttpClient
+from core.http_client import SafeHttpClient, HttpResponse
 from core.scope import ScopeManager
 from core.run_context import RunContext
 
 
 @dataclass
 class JSAssetAnalysis:
+    source_kind: str
     url: str
     status_code: int | None
     content_type: str | None
@@ -21,8 +23,11 @@ class JSAssetAnalysis:
     saved_path: str | None
     discovered_paths: list[str]
     discovered_full_urls: list[str]
+    in_scope_full_urls: list[str]
+    out_of_scope_full_url_count: int
     source_maps: list[str]
     interesting_keywords: list[str]
+    config_signals: list[str]
     risk_score: int
     notes: list[str]
 
@@ -34,11 +39,14 @@ class JSAssetAnalysis:
 class JSAnalysisSummary:
     target: str
     analyzed_assets: int
+    analyzed_inline_documents: int
     skipped_assets: int
     total_discovered_paths: int
     total_discovered_full_urls: int
+    total_in_scope_full_urls: int
     total_source_maps: int
     total_interesting_keywords: int
+    total_config_signals: int
     assets: list[dict]
     skipped: list[dict]
 
@@ -47,6 +55,26 @@ class JSAnalysisSummary:
 
 
 class JSAnalyzer:
+    CONFIG_SIGNAL_KEYS = [
+        "apiHost",
+        "apiVersion",
+        "dataset",
+        "hyperbaseOrigin",
+        "loginUri",
+        "marketingOrigin",
+        "projectId",
+        "useProjectHostname",
+        "vercelGitRef",
+    ]
+
+    JAVASCRIPT_CONTENT_TYPES = (
+        "application/javascript",
+        "application/x-javascript",
+        "text/javascript",
+        "text/ecmascript",
+        "application/ecmascript",
+    )
+
     def __init__(self, scope: ScopeManager, run_context: RunContext):
         self.scope = scope
         self.ctx = run_context
@@ -73,11 +101,19 @@ class JSAnalyzer:
                 )
                 continue
 
-            analysis = self._analyze_single_js(url)
+            analysis, skip_reason = self._analyze_single_js(url)
+            if analysis is None:
+                skipped.append(
+                    {
+                        "url": url,
+                        "reason": skip_reason or "analysis_skipped",
+                    }
+                )
+                continue
+
             assets.append(analysis.to_dict())
 
         skipped_count = len(js_urls) - len(js_urls[:max_assets])
-
         if skipped_count > 0:
             skipped.append(
                 {
@@ -86,14 +122,21 @@ class JSAnalyzer:
                 }
             )
 
+        inline_assets, inline_skipped = self._analyze_inline_documents()
+        assets.extend(item.to_dict() for item in inline_assets)
+        skipped.extend(inline_skipped)
+
         summary = JSAnalysisSummary(
             target=self.ctx.target_url,
-            analyzed_assets=len(assets),
+            analyzed_assets=sum(1 for asset in assets if asset.get("source_kind") == "remote_js_asset"),
+            analyzed_inline_documents=sum(1 for asset in assets if asset.get("source_kind") == "crawl_html_inline"),
             skipped_assets=len(skipped),
             total_discovered_paths=sum(len(asset.get("discovered_paths", [])) for asset in assets),
             total_discovered_full_urls=sum(len(asset.get("discovered_full_urls", [])) for asset in assets),
+            total_in_scope_full_urls=sum(len(asset.get("in_scope_full_urls", [])) for asset in assets),
             total_source_maps=sum(len(asset.get("source_maps", [])) for asset in assets),
             total_interesting_keywords=sum(len(asset.get("interesting_keywords", [])) for asset in assets),
+            total_config_signals=sum(len(asset.get("config_signals", [])) for asset in assets),
             assets=assets,
             skipped=skipped,
         )
@@ -105,12 +148,15 @@ class JSAnalyzer:
 
         self.ctx.add_event(
             event_type="js_analysis_completed",
-            message="JavaScript analysis completed.",
+            message="JavaScript and inline app analysis completed.",
             data={
                 "analyzed_assets": summary.analyzed_assets,
+                "analyzed_inline_documents": summary.analyzed_inline_documents,
                 "total_discovered_paths": summary.total_discovered_paths,
+                "total_in_scope_full_urls": summary.total_in_scope_full_urls,
                 "total_source_maps": summary.total_source_maps,
                 "total_interesting_keywords": summary.total_interesting_keywords,
+                "total_config_signals": summary.total_config_signals,
             },
         )
 
@@ -137,45 +183,120 @@ class JSAnalyzer:
 
         return sorted(urls)
 
-    def _analyze_single_js(self, url: str) -> JSAssetAnalysis:
+    def _analyze_single_js(self, url: str) -> tuple[JSAssetAnalysis | None, str | None]:
         self.scope.assert_action_allowed(url, method="GET")
         response = self.client.get(url)
 
+        if not self._is_javascript_like_response(url, response):
+            if response.status_code is not None and response.status_code >= 400:
+                return None, f"non_success_status:{response.status_code}"
+            return None, "non_javascript_response"
+
         body = response.body or ""
-        saved_path = None
+        filename = self._safe_filename(url)
+        output_path = self.js_raw_dir / filename
+        output_path.write_text(body, encoding="utf-8")
 
-        if body:
-            filename = self._safe_filename(url)
-            output_path = self.js_raw_dir / filename
-            output_path.write_text(body, encoding="utf-8")
-            saved_path = str(output_path)
-
-        discovered_paths = self._extract_paths(body)
-        discovered_full_urls = self._extract_full_urls(body)
-        source_maps = self._extract_source_maps(body)
-        interesting_keywords = self._extract_interesting_keywords(body)
-        risk_score = self._score_asset(
-            url=url,
-            discovered_paths=discovered_paths,
-            source_maps=source_maps,
-            interesting_keywords=interesting_keywords,
-        )
-        notes = self._build_notes(
-            discovered_paths=discovered_paths,
-            source_maps=source_maps,
-            interesting_keywords=interesting_keywords,
-        )
-
-        return JSAssetAnalysis(
+        return self._build_analysis(
+            source_kind="remote_js_asset",
             url=url,
             status_code=response.status_code,
             content_type=response.content_type,
+            body=body,
+            saved_path=str(output_path),
+        ), None
+
+    def _analyze_inline_documents(self) -> tuple[list[JSAssetAnalysis], list[dict]]:
+        crawl_path = self.parsed_dir / "crawl_result.json"
+        if not crawl_path.exists():
+            return [], []
+
+        crawl_data = self._read_json(crawl_path)
+        pages = crawl_data.get("pages", [])
+        if not isinstance(pages, list):
+            return [], []
+
+        assets: list[JSAssetAnalysis] = []
+        skipped: list[dict] = []
+
+        for page in pages:
+            url = str(page.get("url", "")).strip()
+            if not url:
+                continue
+
+            raw_path = self.raw_dir / f"crawl_{self._crawl_safe_filename(url)}.html"
+            if not raw_path.exists():
+                skipped.append(
+                    {
+                        "url": url,
+                        "reason": "missing_crawl_raw_html",
+                    }
+                )
+                continue
+
+            body = raw_path.read_text(encoding="utf-8", errors="ignore")
+            inline_body = self._extract_inline_script_content(body)
+            combined_body = f"{inline_body}\n{body}" if inline_body else body
+
+            analysis = self._build_analysis(
+                source_kind="crawl_html_inline",
+                url=url,
+                status_code=page.get("status_code"),
+                content_type=page.get("content_type"),
+                body=combined_body,
+                saved_path=str(raw_path),
+            )
+            assets.append(analysis)
+
+        return assets, skipped
+
+    def _build_analysis(
+        self,
+        source_kind: str,
+        url: str,
+        status_code: int | None,
+        content_type: str | None,
+        body: str,
+        saved_path: str | None,
+    ) -> JSAssetAnalysis:
+        discovered_paths = self._extract_paths(body)
+        discovered_full_urls = self._extract_full_urls(body)
+        in_scope_full_urls = [item for item in discovered_full_urls if self.scope.is_target_allowed(item)]
+        source_maps = self._extract_source_maps(body)
+        interesting_keywords = self._extract_interesting_keywords(body)
+        config_signals = self._extract_config_signals(body)
+        risk_score = self._score_asset(
+            url=url,
+            source_kind=source_kind,
+            discovered_paths=discovered_paths,
+            in_scope_full_urls=in_scope_full_urls,
+            source_maps=source_maps,
+            interesting_keywords=interesting_keywords,
+            config_signals=config_signals,
+        )
+        notes = self._build_notes(
+            source_kind=source_kind,
+            discovered_paths=discovered_paths,
+            in_scope_full_urls=in_scope_full_urls,
+            source_maps=source_maps,
+            interesting_keywords=interesting_keywords,
+            config_signals=config_signals,
+        )
+
+        return JSAssetAnalysis(
+            source_kind=source_kind,
+            url=url,
+            status_code=status_code,
+            content_type=content_type,
             size_bytes=len(body.encode("utf-8")),
             saved_path=saved_path,
             discovered_paths=discovered_paths,
             discovered_full_urls=discovered_full_urls,
+            in_scope_full_urls=in_scope_full_urls,
+            out_of_scope_full_url_count=max(len(discovered_full_urls) - len(in_scope_full_urls), 0),
             source_maps=source_maps,
             interesting_keywords=interesting_keywords,
+            config_signals=config_signals,
             risk_score=risk_score,
             notes=notes,
         )
@@ -185,8 +306,8 @@ class JSAnalyzer:
             return []
 
         patterns = [
-            r"""["'`]((?:/api|/rest|/graphql|/auth|/login|/signin|/logout|/admin|/user|/users|/profile|/account|/me|/basket|/cart|/checkout|/payment|/order|/orders|/invoice|/billing|/config|/debug|/swagger|/openapi|/search|/redirect)[^"'`\s<>{}]*)["'`]""",
-            r"""["'`]([A-Za-z0-9_.-]+/(?:api|auth|login|admin|user|profile|account|checkout|payment|order|config|debug|swagger|openapi)[^"'`\s<>{}]*)["'`]""",
+            r"""["'`]((?:/api|/rest|/graphql|/auth|/login|/signin|/logout|/admin|/user|/users|/profile|/account|/me|/basket|/cart|/checkout|/payment|/order|/orders|/invoice|/billing|/config|/debug|/swagger|/openapi|/search|/redirect|/callback|/internal)[^"'`\s<>{}]*)["'`]""",
+            r"""["'`]([A-Za-z0-9_.-]+/(?:api|auth|login|admin|user|profile|account|checkout|payment|order|config|debug|swagger|openapi|callback|internal)(?:[/?#._-][^"'`\s<>{}]*)?)["'`]""",
         ]
 
         results: set[str] = set()
@@ -194,7 +315,6 @@ class JSAnalyzer:
         for pattern in patterns:
             for match in re.findall(pattern, body, flags=re.IGNORECASE):
                 value = str(match).strip()
-
                 if self._is_useful_path(value):
                     results.add(value)
 
@@ -208,8 +328,9 @@ class JSAnalyzer:
         urls = set()
 
         for match in re.findall(pattern, body, flags=re.IGNORECASE):
-            cleaned = match.rstrip(".,;]")
-            urls.add(cleaned)
+            cleaned = self._clean_extracted_url(match)
+            if cleaned:
+                urls.add(cleaned)
 
         return sorted(urls)
 
@@ -219,14 +340,15 @@ class JSAnalyzer:
 
         patterns = [
             r"""sourceMappingURL=([^\s"'`<>)]+)""",
-            r"""["'`]([^"'`]+\.map)["'`]""",
+            r"""["'`]([^"'`]+\.map(?:\?[^"'`]*)?)["'`]""",
         ]
 
         results = set()
-
         for pattern in patterns:
             for match in re.findall(pattern, body, flags=re.IGNORECASE):
-                results.add(str(match).strip())
+                cleaned = str(match).strip()
+                if cleaned:
+                    results.add(cleaned)
 
         return sorted(results)
 
@@ -242,7 +364,7 @@ class JSAnalyzer:
             "business_logic": ["basket", "cart", "checkout", "payment", "order", "invoice", "billing"],
             "debug": ["debug", "dev", "staging", "test", "sourceMappingURL"],
             "storage": ["localStorage", "sessionStorage", "cookie"],
-            "redirect": ["redirect", "callback", "returnUrl", "nextUrl"],
+            "redirect": ["redirect", "callback", "returnUrl", "nextUrl", "loginUri"],
         }
 
         lowered = body.lower()
@@ -255,12 +377,43 @@ class JSAnalyzer:
 
         return sorted(set(found))
 
+    def _extract_config_signals(self, body: str) -> list[str]:
+        if not body:
+            return []
+
+        normalized_body = (
+            body.replace("\\/", "/")
+            .replace('\\"', '"')
+            .replace("\\u0026", "&")
+        )
+
+        signals: list[str] = []
+        for key in self.CONFIG_SIGNAL_KEYS:
+            pattern = rf"""["']{re.escape(key)}["']\s*:\s*(["']?)([^"'<>\n\r,}}]+)\1"""
+            for match in re.findall(pattern, normalized_body):
+                value = str(match[1]).strip()
+                if not value:
+                    continue
+
+                if any(marker in value for marker in ("(", "{", "}", "=>")):
+                    continue
+
+                cleaned = value[:180]
+                signal = f"{key}={cleaned}"
+                if signal not in signals:
+                    signals.append(signal)
+
+        return sorted(signals)
+
     def _score_asset(
         self,
         url: str,
+        source_kind: str,
         discovered_paths: list[str],
+        in_scope_full_urls: list[str],
         source_maps: list[str],
         interesting_keywords: list[str],
+        config_signals: list[str],
     ) -> int:
         score = 0
 
@@ -270,9 +423,14 @@ class JSAnalyzer:
         if url.endswith("scripts.js"):
             score += 2
 
+        if source_kind == "crawl_html_inline":
+            score += 2
+
         score += min(len(discovered_paths), 10)
+        score += min(len(in_scope_full_urls), 8)
         score += min(len(source_maps) * 3, 9)
         score += min(len(interesting_keywords), 10)
+        score += min(len(config_signals), 8)
 
         if any("auth:" in item for item in interesting_keywords):
             score += 3
@@ -283,21 +441,39 @@ class JSAnalyzer:
         if any("business_logic:" in item for item in interesting_keywords):
             score += 2
 
+        if any(signal.startswith("loginUri=") for signal in config_signals):
+            score += 2
+
+        if any(signal.startswith("vercelGitRef=") for signal in config_signals):
+            score += 1
+
         return score
 
     def _build_notes(
         self,
+        source_kind: str,
         discovered_paths: list[str],
+        in_scope_full_urls: list[str],
         source_maps: list[str],
         interesting_keywords: list[str],
+        config_signals: list[str],
     ) -> list[str]:
         notes = []
 
+        if source_kind == "crawl_html_inline":
+            notes.append("Inline page scripts or framework state were analyzed from crawl HTML.")
+
         if discovered_paths:
-            notes.append("JavaScript contains route/API-like paths worth reviewing.")
+            notes.append("JavaScript or inline app state contains route/API-like paths worth reviewing.")
+
+        if in_scope_full_urls:
+            notes.append("In-scope full URLs were extracted and can feed safe endpoint validation.")
 
         if source_maps:
             notes.append("JavaScript references source map files; check exposure carefully and safely.")
+
+        if config_signals:
+            notes.append("Framework or app config signals were extracted for manual review.")
 
         if interesting_keywords:
             notes.append("JavaScript contains security-relevant keywords. Review context manually.")
@@ -306,6 +482,62 @@ class JSAnalyzer:
             notes.append("No strong JS review signals found.")
 
         return notes
+
+    def _extract_inline_script_content(self, body: str) -> str:
+        if not body:
+            return ""
+
+        blocks = re.findall(
+            r"""<script\b[^>]*>(.*?)</script>""",
+            body,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        return "\n".join(blocks)
+
+    def _is_javascript_like_response(self, url: str, response: HttpResponse) -> bool:
+        body_head = (response.body or "")[:800].lower()
+        content_type = (response.content_type or "").lower()
+        path = urlparse(url).path.lower()
+
+        if response.status_code is None or response.status_code >= 400:
+            return False
+
+        if "<!doctype html" in body_head or "<html" in body_head:
+            return False
+
+        if "html" in content_type:
+            return False
+
+        if any(value in content_type for value in self.JAVASCRIPT_CONTENT_TYPES):
+            return True
+
+        if path.endswith((".js", ".mjs")) and any(
+            marker in body_head
+            for marker in ("function", "const ", "var ", "let ", "=>", "self.__next", "webpack")
+        ):
+            return True
+
+        return False
+
+    def _clean_extracted_url(self, value: str) -> str | None:
+        cleaned = (
+            unescape(value)
+            .replace("\\/", "/")
+            .replace("\\u0026", "&")
+            .strip()
+            .rstrip("\\")
+            .rstrip(".,;])")
+        )
+        cleaned = re.split(r"""["'<>},]""", cleaned, maxsplit=1)[0].strip()
+
+        if not cleaned.startswith(("http://", "https://")):
+            return None
+
+        parsed = urlparse(cleaned)
+        if not parsed.netloc:
+            return None
+
+        return cleaned
 
     def _is_useful_path(self, value: str) -> bool:
         if not value:
@@ -320,13 +552,19 @@ class JSAnalyzer:
         if value in {"/", "./", "../"}:
             return False
 
+        if value.startswith(("/Users/", "/home/", "/var/", "C:/", "D:/", "file:/")):
+            return False
+
         return True
 
     def _looks_like_js_url(self, value: str) -> bool:
         parsed = urlparse(value)
         path = parsed.path.lower()
-
         return path.endswith(".js")
+
+    def _crawl_safe_filename(self, url: str) -> str:
+        value = re.sub(r"[^a-zA-Z0-9._-]+", "_", url)
+        return value[:120] or "page"
 
     def _safe_filename(self, url: str) -> str:
         digest = hashlib.sha256(url.encode("utf-8")).hexdigest()[:12]

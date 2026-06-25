@@ -22,6 +22,8 @@ class ReportGenerator:
         findings = self._read_json(self.parsed_dir / "normalized_findings.json")
         triage_candidates = self._read_json(self.parsed_dir / "triage_candidates.json")
         js_analysis = self._read_json(self.parsed_dir / "js_analysis.json")
+        nmap_scan = self._read_json(self.parsed_dir / "nmap_scan.json")
+        session_signals = self._read_json(self.parsed_dir / "session_signals.json")
         endpoint_validation = self._read_json(self.parsed_dir / "endpoint_validation.json")
         validation_plan = self._read_json(self.parsed_dir / "validation_plan.json")
         ranked_candidates = self._read_json(self.parsed_dir / "ranked_candidates.json")
@@ -38,6 +40,12 @@ class ReportGenerator:
         if not isinstance(endpoint_validation, dict):
             endpoint_validation = {}
 
+        if not isinstance(nmap_scan, dict):
+            nmap_scan = {}
+
+        if not isinstance(session_signals, dict):
+            session_signals = {}
+
         if not isinstance(validation_plan, dict):
             validation_plan = {}
 
@@ -51,6 +59,8 @@ class ReportGenerator:
             findings=findings,
             triage_candidates=triage_candidates,
             js_analysis=js_analysis,
+            nmap_scan=nmap_scan,
+            session_signals=session_signals,
             endpoint_validation=endpoint_validation,
             validation_plan=validation_plan,
             ranked_candidates=ranked_candidates,
@@ -68,6 +78,8 @@ class ReportGenerator:
         findings: list[dict],
         triage_candidates: list[dict],
         js_analysis: dict,
+        nmap_scan: dict,
+        session_signals: dict,
         endpoint_validation: dict,
         validation_plan: dict,
         ranked_candidates: dict,
@@ -202,13 +214,43 @@ class ReportGenerator:
 
         if js_analysis:
             lines.append(f"- **Analyzed JS Assets:** `{js_analysis.get('analyzed_assets', 0)}`")
+            lines.append(f"- **Analyzed Inline Documents:** `{js_analysis.get('analyzed_inline_documents', 0)}`")
             lines.append(f"- **Skipped JS Assets:** `{js_analysis.get('skipped_assets', 0)}`")
             lines.append(f"- **Discovered JS Paths:** `{js_analysis.get('total_discovered_paths', 0)}`")
             lines.append(f"- **Discovered Full URLs:** `{js_analysis.get('total_discovered_full_urls', 0)}`")
+            lines.append(f"- **In-Scope Full URLs:** `{js_analysis.get('total_in_scope_full_urls', 0)}`")
             lines.append(f"- **Source Map References:** `{js_analysis.get('total_source_maps', 0)}`")
             lines.append(f"- **Interesting Keyword Hits:** `{js_analysis.get('total_interesting_keywords', 0)}`")
+            lines.append(f"- **Config Signals:** `{js_analysis.get('total_config_signals', 0)}`")
         else:
             lines.append("No JavaScript analysis data was generated.")
+
+        lines.append("")
+        lines.append("## Nmap Summary")
+        lines.append("")
+
+        if nmap_scan:
+            lines.append(f"- **Target Host:** `{nmap_scan.get('target_host', 'unknown')}`")
+            lines.append(f"- **Ports:** `{nmap_scan.get('ports', '')}`")
+            lines.append(f"- **Success:** `{nmap_scan.get('success', False)}`")
+            lines.append(f"- **Host Up:** `{nmap_scan.get('host_up', False)}`")
+            lines.append(f"- **Open Port Count:** `{nmap_scan.get('open_port_count', 0)}`")
+            if nmap_scan.get("error"):
+                lines.append(f"- **Tool Error:** `{nmap_scan.get('error')}`")
+        else:
+            lines.append("No Nmap summary was generated for this run.")
+
+        lines.append("")
+        lines.append("## Session And Cookie Signals")
+        lines.append("")
+
+        if session_signals:
+            lines.append(f"- **Set-Cookie Headers:** `{session_signals.get('set_cookie_count', 0)}`")
+            lines.append(f"- **Auth-Like Cookies:** `{session_signals.get('auth_cookie_count', 0)}`")
+            lines.append(f"- **Issues:** `{session_signals.get('issue_count', 0)}`")
+            lines.append(f"- **Observations:** `{session_signals.get('observation_count', 0)}`")
+        else:
+            lines.append("No passive session or cookie signals were generated for this run.")
 
         lines.append("")
         lines.append("## Endpoint Validation Summary")

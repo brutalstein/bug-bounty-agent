@@ -57,6 +57,26 @@ class NmapTools:
         self.reports_dir = Path(run_context.reports_dir)
         self.reports_dir.mkdir(parents=True, exist_ok=True)
 
+    def is_available(self) -> bool:
+        return self.runner.is_tool_available("nmap")
+
+    def suggested_ports(self, target: str, requested_ports: str = SAFE_DEFAULT_PORTS) -> str:
+        parsed_target = self.scope.parse_target(target)
+        explicit_port = parsed_target.get("port")
+        ordered_ports: list[str] = []
+
+        for item in str(requested_ports).split(","):
+            port = item.strip()
+            if port and port not in ordered_ports:
+                ordered_ports.append(port)
+
+        if explicit_port is not None:
+            port_text = str(explicit_port)
+            if port_text not in ordered_ports:
+                ordered_ports.append(port_text)
+
+        return ",".join(ordered_ports)
+
     def run_safe_port_scan(
         self,
         target: str,

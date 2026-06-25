@@ -191,14 +191,18 @@ class SessionCompareRunner:
         auth_accessible = auth.status_code is not None and 200 <= auth.status_code < 400
 
         unauth_auth_required = self.validator._auth_likely_required(
+            url=url,
             status_code=unauth.status_code,
             body=unauth.body or "",
             final_url=unauth.final_url,
+            content_type=unauth.content_type,
         )
         auth_auth_required = self.validator._auth_likely_required(
+            url=url,
             status_code=auth.status_code,
             body=auth.body or "",
             final_url=auth.final_url,
+            content_type=auth.content_type,
         )
 
         sensitive_added = sorted(set(auth_sensitive) - set(unauth_sensitive))

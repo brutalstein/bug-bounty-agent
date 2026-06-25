@@ -12,6 +12,12 @@ from core.run_context import RunContext
 from core.scope import ScopeManager, SessionProfileConfig
 
 
+STATIC_TOKEN_KINDS = {
+    "static_bearer_token",
+    "static_header_token",
+}
+
+
 @dataclass
 class AuthenticatedSessionArtifact:
     session_profile_name: str
@@ -44,11 +50,6 @@ class AuthenticatedSessionManager:
         self.client = SafeHttpClient(timeout_seconds=10)
 
     def login(self, session_profile_name: str, manual_approval: bool = False) -> AuthenticatedSession:
-        if self.scope.config.mode != "lab":
-            raise PermissionError(
-                "Authenticated session bootstrap is currently restricted to lab profiles."
-            )
-
         if not self.scope.is_authorization_confirmed():
             raise PermissionError(
                 "Authorization is not confirmed for the selected profile."
@@ -59,12 +60,71 @@ class AuthenticatedSessionManager:
                 "Authenticated crawl requires explicit manual approval."
             )
 
+        profile = self.scope.get_session_profile(session_profile_name)
+
+        if profile.kind in STATIC_TOKEN_KINDS:
+            return self._create_static_token_session(profile)
+
+        return self._login_with_json_post(profile, session_profile_name)
+
+    def _create_static_token_session(self, profile: SessionProfileConfig) -> AuthenticatedSession:
+        if profile.login_url and not self.scope.is_target_allowed(profile.login_url):
+            raise PermissionError(
+                f"Session profile reference URL is out of scope for `{profile.name}`."
+            )
+
+        username = self._resolve_static_identity(profile)
+        token = self._resolve_static_token(profile)
+        header_value = self._build_header_value(profile, token)
+        derived_role = profile.role_hint
+
+        artifact = AuthenticatedSessionArtifact(
+            session_profile_name=profile.name,
+            kind=profile.kind,
+            login_url=profile.login_url,
+            username=username,
+            role_hint=profile.role_hint,
+            derived_role=derived_role,
+            acquired_at=datetime.now(timezone.utc).isoformat(),
+            auth_header_name=profile.auth_header_name,
+            auth_header_prefix=profile.auth_header_prefix,
+            token_sha256=hashlib.sha256(token.encode("utf-8")).hexdigest(),
+            token_fingerprint=self._token_fingerprint(token),
+            notes=profile.notes,
+        )
+
+        self.ctx.write_json("parsed/auth_session.json", artifact.to_dict())
+        self.ctx.add_event(
+            event_type="auth_session_created",
+            message="Authenticated session created from operator-supplied token material.",
+            data={
+                "session_profile_name": profile.name,
+                "reference_url": profile.login_url,
+                "username": username,
+                "derived_role": derived_role,
+            },
+        )
+
+        return AuthenticatedSession(
+            artifact=artifact,
+            headers={profile.auth_header_name: header_value},
+        )
+
+    def _login_with_json_post(
+        self,
+        profile: SessionProfileConfig,
+        session_profile_name: str,
+    ) -> AuthenticatedSession:
+        if not self.scope.is_lab_profile():
+            raise PermissionError(
+                "Interactive POST-based session bootstrap is currently restricted to lab profiles."
+            )
+
         if not self.scope.is_method_allowed("POST"):
             raise PermissionError(
                 "Policy does not allow POST for authenticated session bootstrap."
             )
 
-        profile = self.scope.get_session_profile(session_profile_name)
         if not profile.login_url:
             raise ValueError(
                 f"Session profile `{session_profile_name}` is missing login_url."
@@ -113,7 +173,7 @@ class AuthenticatedSessionManager:
         self.ctx.write_json("parsed/auth_session.json", artifact.to_dict())
         self.ctx.add_event(
             event_type="auth_session_created",
-            message="Authenticated lab session created.",
+            message="Authenticated session created from scoped lab login.",
             data={
                 "session_profile_name": session_profile_name,
                 "login_url": profile.login_url,
@@ -147,6 +207,30 @@ class AuthenticatedSessionManager:
             )
 
         return username, password
+
+    def _resolve_static_identity(self, profile: SessionProfileConfig) -> str:
+        username = ""
+        if profile.username_env:
+            username = str(os.getenv(profile.username_env, "")).strip()
+        if not username:
+            username = profile.username_default
+        return username or "operator-supplied-session"
+
+    def _resolve_static_token(self, profile: SessionProfileConfig) -> str:
+        token = ""
+        if profile.token_env:
+            token = str(os.getenv(profile.token_env, "")).strip()
+        if not token:
+            token = profile.token_default
+
+        if not token:
+            env_hint = profile.token_env or "unset-token-env"
+            raise ValueError(
+                f"Session profile `{profile.name}` requires token material. "
+                f"Set `{env_hint}` before using it."
+            )
+
+        return token
 
     def _extract_token(self, body: str, path: str) -> str:
         try:

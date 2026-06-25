@@ -50,7 +50,7 @@ class PreflightChecker:
         warnings: list[str] = []
 
         target_reachable = response.status_code is not None
-        lab_expected = self.scope.config.mode == "lab" or self.scope.config.target_type == "training-lab"
+        lab_expected = self.scope.is_lab_profile()
 
         if not explanation["allowed"]:
             blocking_issues.append("target_out_of_scope")

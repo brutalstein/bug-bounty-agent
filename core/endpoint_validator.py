@@ -166,6 +166,14 @@ class EndpointValidator:
                         source=f"js_analysis:{asset_url}",
                     )
 
+                for full_url in asset.get("in_scope_full_urls", []):
+                    self._add_candidate(
+                        candidates=candidates,
+                        seen=seen,
+                        url=str(full_url),
+                        source=f"js_analysis_full_url:{asset_url}",
+                    )
+
         katana_path = self.parsed_dir / "pd_katana_outputs.json"
         if katana_path.exists():
             data = self._read_json(katana_path)
@@ -245,9 +253,11 @@ class EndpointValidator:
         accessible = status_code is not None and 200 <= status_code < 400
         redirect_likely = status_code is not None and 300 <= status_code < 400
         auth_likely_required = self._auth_likely_required(
+            url=url,
             status_code=status_code,
             body=body,
             final_url=response.final_url,
+            content_type=response.content_type,
         )
 
         exposure_likely = self._exposure_likely(
@@ -256,6 +266,7 @@ class EndpointValidator:
             sensitive_indicators=sensitive_indicators,
             body=body,
             category=category,
+            content_type=response.content_type,
         )
 
         interesting = self._is_interesting(
@@ -265,6 +276,7 @@ class EndpointValidator:
             auth_likely_required=auth_likely_required,
             exposure_likely=exposure_likely,
             body=body,
+            content_type=response.content_type,
         )
 
         risk_hint = self._risk_hint(
@@ -305,7 +317,7 @@ class EndpointValidator:
         return urljoin(self.ctx.target_url.rstrip("/") + "/", value.lstrip("/"))
 
     def _clean_url(self, url: str) -> str:
-        url = url.strip()
+        url = url.strip().strip("\"'").rstrip("\\")
 
         if not url:
             return ""
@@ -318,7 +330,39 @@ class EndpointValidator:
         return url.rstrip("/")
 
     def _classify_endpoint(self, url: str) -> str:
-        lowered = url.lower()
+        parsed = urlparse(url)
+        lowered_path = parsed.path.lower()
+        lowered_query = parsed.query.lower()
+        lowered = f"{lowered_path}?{lowered_query}" if lowered_query else lowered_path
+
+        marketing_prefixes = (
+            "/about",
+            "/articles",
+            "/breakthroughs",
+            "/company/",
+            "/contact-sales",
+            "/customer-stories",
+            "/downloads",
+            "/events-webinars",
+            "/guides",
+            "/integrations",
+            "/lp/resources",
+            "/newsroom",
+            "/partners",
+            "/platform/",
+            "/pricing",
+            "/services",
+            "/solutions",
+            "/templates",
+            "/videos",
+            "/whatsnew",
+        )
+
+        if lowered_path in {"", "/"}:
+            return "generic_endpoint"
+
+        if lowered_path.startswith(marketing_prefixes):
+            return "marketing_content"
 
         if self._contains_any(lowered, ["admin", "administrator", "manage", "dashboard"]):
             return "admin_or_privileged_area"
@@ -338,38 +382,42 @@ class EndpointValidator:
         if self._contains_any(lowered, ["search", "query", "redirect", "url", "next", "callback", "return"]):
             return "input_surface"
 
-        if self._contains_any(lowered, ["config", "debug", "dev", "test", "staging", "backup", "old"]):
+        if self._has_path_segment(lowered_path, ["config", "debug", "dev", "test", "staging", "backup", "old"]):
             return "exposure_surface"
 
         return "generic_endpoint"
 
     def _auth_likely_required(
         self,
+        url: str,
         status_code: int | None,
         body: str,
         final_url: str | None,
+        content_type: str | None,
     ) -> bool:
         if status_code in {401, 403}:
             return True
 
         lowered_body = body.lower()
+        lowered_url = url.lower()
         lowered_final = (final_url or "").lower()
+        html_like = self._is_html_content(content_type, body)
+
+        if lowered_final and lowered_final != lowered_url:
+            if any(indicator in lowered_final for indicator in ["/login", "/signin", "/auth", "/oauth"]):
+                return True
 
         auth_indicators = [
             "unauthorized",
             "forbidden",
-            "login",
-            "sign in",
-            "authentication",
-            "authorization",
+            "authentication required",
+            "authorization required",
             "invalid token",
             "jwt",
+            "access denied",
         ]
 
-        if any(indicator in lowered_body for indicator in auth_indicators):
-            return True
-
-        if any(indicator in lowered_final for indicator in ["login", "signin", "auth"]):
+        if not html_like and any(indicator in lowered_body for indicator in auth_indicators):
             return True
 
         return False
@@ -381,6 +429,7 @@ class EndpointValidator:
         sensitive_indicators: list[str],
         body: str,
         category: str,
+        content_type: str | None,
     ) -> bool:
         if not accessible:
             return False
@@ -388,8 +437,13 @@ class EndpointValidator:
         if status_code != 200:
             return False
 
+        html_like = self._is_html_content(content_type, body)
+
         if category in {"exposure_surface", "user_data_surface", "api_surface"} and sensitive_indicators:
             return True
+
+        if html_like:
+            return False
 
         lowered = body.lower()
 
@@ -417,6 +471,7 @@ class EndpointValidator:
         auth_likely_required: bool,
         exposure_likely: bool,
         body: str,
+        content_type: str | None,
     ) -> bool:
         if exposure_likely:
             return True
@@ -431,8 +486,14 @@ class EndpointValidator:
         }:
             return True
 
+        if category == "marketing_content":
+            return False
+
         if status_code in {401, 403} and auth_likely_required:
             return True
+
+        if self._is_html_content(content_type, body):
+            return False
 
         lowered = body.lower()
 
@@ -484,6 +545,9 @@ class EndpointValidator:
         if category == "api_surface" and accessible:
             return "API-like endpoint is reachable. Map methods and auth requirements safely."
 
+        if category == "marketing_content":
+            return "Public marketing or documentation route. Inventory only unless another signal raises impact."
+
         if auth_likely_required:
             return "Endpoint appears protected or auth-related."
 
@@ -527,6 +591,19 @@ class EndpointValidator:
 
     def _contains_any(self, value: str, keywords: list[str]) -> bool:
         return any(keyword in value for keyword in keywords)
+
+    def _has_path_segment(self, path: str, segments: list[str]) -> bool:
+        normalized = path.strip("/")
+        if not normalized:
+            return False
+
+        parts = [part for part in normalized.split("/") if part]
+        return any(part in segments for part in parts)
+
+    def _is_html_content(self, content_type: str | None, body: str) -> bool:
+        if content_type and "html" in content_type.lower():
+            return True
+        return "<html" in body[:2000].lower()
 
     def _make_id(self, value: str) -> str:
         digest = hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]

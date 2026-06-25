@@ -2,14 +2,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass, asdict
 from pathlib import Path
-from urllib.request import Request, urlopen
-from urllib.error import URLError, HTTPError
 import json
 import re
-import time
 
+from core.http_client import SafeHttpClient
 from core.scope import ScopeManager
 from core.run_context import RunContext
+from core.session_signals import SessionSignalAnalyzer
 
 
 @dataclass
@@ -20,6 +19,13 @@ class HttpProbeResult:
     content_type: str | None
     server: str | None
     title: str | None
+    header_count: int
+    set_cookie_count: int
+    redirect_hop_count: int
+    redirect_cookie_count: int
+    cross_host_redirect_count: int
+    session_signal_issue_count: int
+    session_signal_observation_count: int
     response_time_seconds: float
     success: bool
     error: str | None = None
@@ -34,104 +40,44 @@ class ReconTools:
         self.ctx = run_context
         self.parsed_dir = Path(run_context.parsed_dir)
         self.raw_dir = Path(run_context.raw_dir)
+        self.client = SafeHttpClient()
 
     def http_probe(self, target: str, timeout_seconds: int = 10) -> HttpProbeResult:
         self.scope.assert_action_allowed(target, method="GET")
+        self.client.timeout_seconds = timeout_seconds
+        response = self.client.get(target)
 
-        start = time.time()
+        if response.body:
+            self._save_raw("http_probe_body.html", response.body)
 
-        request = Request(
-            target,
-            headers={
-                "User-Agent": "BugBountyAgent/0.1 Authorized-Lab-Scanner",
-                "Accept": "text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8",
-            },
-            method="GET",
+        signal_summary = SessionSignalAnalyzer(self.ctx).analyze(response)
+
+        result = HttpProbeResult(
+            target=target,
+            final_url=response.final_url,
+            status_code=response.status_code,
+            content_type=response.content_type,
+            server=response.server,
+            title=self._extract_title(response.body),
+            header_count=len(response.headers),
+            set_cookie_count=len(response.set_cookie_headers),
+            redirect_hop_count=signal_summary.redirect_hop_count,
+            redirect_cookie_count=signal_summary.redirect_cookie_count,
+            cross_host_redirect_count=signal_summary.cross_host_redirect_count,
+            session_signal_issue_count=signal_summary.issue_count,
+            session_signal_observation_count=signal_summary.observation_count,
+            response_time_seconds=response.response_time_seconds,
+            success=response.success,
+            error=response.error,
         )
 
-        try:
-            with urlopen(request, timeout=timeout_seconds) as response:
-                body_bytes = response.read(500_000)
-                body = body_bytes.decode("utf-8", errors="ignore")
-
-                duration = time.time() - start
-
-                result = HttpProbeResult(
-                    target=target,
-                    final_url=response.geturl(),
-                    status_code=response.status,
-                    content_type=response.headers.get("content-type"),
-                    server=response.headers.get("server"),
-                    title=self._extract_title(body),
-                    response_time_seconds=round(duration, 3),
-                    success=True,
-                    error=None,
-                )
-
-                self._save_raw("http_probe_body.html", body)
-                self._save_json("http_probe.json", result.to_dict())
-
-                self.ctx.add_event(
-                    event_type="http_probe_completed",
-                    message="HTTP probe completed successfully.",
-                    data=result.to_dict(),
-                )
-
-                return result
-
-        except HTTPError as error:
-            duration = time.time() - start
-
-            result = HttpProbeResult(
-                target=target,
-                final_url=target,
-                status_code=error.code,
-                content_type=error.headers.get("content-type") if error.headers else None,
-                server=error.headers.get("server") if error.headers else None,
-                title=None,
-                response_time_seconds=round(duration, 3),
-                success=False,
-                error=f"HTTP error: {error.code}",
-            )
-
-            self._save_json("http_probe.json", result.to_dict())
-            return result
-
-        except URLError as error:
-            duration = time.time() - start
-
-            result = HttpProbeResult(
-                target=target,
-                final_url=None,
-                status_code=None,
-                content_type=None,
-                server=None,
-                title=None,
-                response_time_seconds=round(duration, 3),
-                success=False,
-                error=str(error),
-            )
-
-            self._save_json("http_probe.json", result.to_dict())
-            return result
-
-        except Exception as error:
-            duration = time.time() - start
-
-            result = HttpProbeResult(
-                target=target,
-                final_url=None,
-                status_code=None,
-                content_type=None,
-                server=None,
-                title=None,
-                response_time_seconds=round(duration, 3),
-                success=False,
-                error=str(error),
-            )
-
-            self._save_json("http_probe.json", result.to_dict())
-            return result
+        self._save_json("http_probe.json", result.to_dict())
+        self.ctx.add_event(
+            event_type="http_probe_completed",
+            message="HTTP probe completed successfully.",
+            data=result.to_dict(),
+        )
+        return result
 
     def _extract_title(self, html: str) -> str | None:
         match = re.search(r"<title[^>]*>(.*?)</title>", html, re.IGNORECASE | re.DOTALL)

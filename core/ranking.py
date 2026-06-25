@@ -194,8 +194,20 @@ class CandidateRanker:
         if source == "endpoint_validation":
             score += 8
 
+        if source == "browser_surface_compare":
+            score += 10
+
         if source == "js_analysis":
             score -= 4
+
+        if "shared_auth_cookies=" in evidence_blob:
+            score += 10
+
+        if "auth_storage_key_count=" in evidence_blob:
+            score += 8
+
+        if "auth_cookie_count=" in evidence_blob:
+            score += 6
 
         return max(0, score)
 
@@ -212,6 +224,9 @@ class CandidateRanker:
             "token",
             "secret",
             "hash",
+            "cookie",
+            "session",
+            "storage",
             "admin",
             "wallet",
             "payment",

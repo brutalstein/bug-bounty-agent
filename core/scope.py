@@ -54,6 +54,8 @@ class SessionProfileConfig:
     password_default: str
     username_env: str
     password_env: str
+    token_default: str
+    token_env: str
     token_json_path: str
     auth_header_name: str
     auth_header_prefix: str
@@ -276,6 +278,8 @@ class ScopeManager:
                 password_default=str(item.get("password_default", "")).strip(),
                 username_env=str(item.get("username_env", "")).strip(),
                 password_env=str(item.get("password_env", "")).strip(),
+                token_default=str(item.get("token_default", "")).strip(),
+                token_env=str(item.get("token_env", "")).strip(),
                 token_json_path=str(item.get("token_json_path", "authentication.token")).strip(),
                 auth_header_name=str(item.get("auth_header_name", "Authorization")).strip(),
                 auth_header_prefix=str(item.get("auth_header_prefix", "Bearer")).strip(),
@@ -364,6 +368,15 @@ class ScopeManager:
     def is_authorization_confirmed(self) -> bool:
         return self.config.authorization.confirmed
 
+    def is_lab_profile(self) -> bool:
+        return (
+            self.config.target_type == "training-lab"
+            or self.config.authorization.kind == "local_lab"
+        )
+
+    def effective_mode(self) -> str:
+        return "lab" if self.is_lab_profile() else "authorized"
+
     def list_session_profiles(self) -> list[dict]:
         items = []
 
@@ -373,6 +386,7 @@ class ScopeManager:
                     "name": name,
                     "kind": profile.kind,
                     "login_url": profile.login_url,
+                    "token_env": profile.token_env,
                     "role_hint": profile.role_hint,
                 }
             )
@@ -427,7 +441,7 @@ class ScopeManager:
             "url_allowed": url_allowed,
             "path_allowed": path_allowed,
             "allowed": allowed,
-            "mode": self.config.mode,
+            "mode": self.effective_mode(),
             "target_profile": self.config.target_name,
             "profile_name": self.config.profile_name,
             "authorization_kind": self.config.authorization.kind,
@@ -447,7 +461,7 @@ class ScopeManager:
             "target_name": self.config.target_name,
             "target_type": self.config.target_type,
             "base_url": self.config.base_url,
-            "mode": self.config.mode,
+            "mode": self.effective_mode(),
             "program_name": self.config.policy.program_name,
             "program_url": self.config.policy.program_url,
             "authorization": {

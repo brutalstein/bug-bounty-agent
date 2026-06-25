@@ -109,10 +109,16 @@ profiles:
       allowed_hosts:
         - "staging.airtable.com"
         - "www.staging.airtable.com"
+        - "api-staging.airtable.com"
+        - "mcp.staging.airtable.com"
+        - "static.staging.airtable.com"
 
       allowed_url_patterns:
         - "https://staging.airtable.com/*"
         - "https://www.staging.airtable.com/*"
+        - "https://api-staging.airtable.com/*"
+        - "https://mcp.staging.airtable.com/*"
+        - "https://static.staging.airtable.com/*"
 
       blocked_hosts: []
 
@@ -123,7 +129,7 @@ profiles:
       allow_subdomain_scan: false
       allow_port_scan: false
       allow_active_scan: false
-      allow_browser_crawl: false
+      allow_browser_crawl: true
       require_scope_check: true
       save_all_outputs: true
 
@@ -135,7 +141,7 @@ profiles:
     authorization:
       kind: "public_bug_bounty_policy"
       confirmed: true
-      evidence: "Official Airtable security.txt points to HackerOne policy. Official HackerOne policy snippet says only perform testing against staging.airtable.com. Reviewed on 2026-06-25 for read-only probing only."
+      evidence: "Official Airtable security.txt points to HackerOne policy. Airtable HackerOne scope page reviewed on June 25, 2026 lists staging.airtable.com, api-staging.airtable.com, mcp.staging.airtable.com, airtable.js, and the Airtable MCP CLI in scope. This profile remains limited to low-rate, read-only probing."
 
     policy:
       program_name: "Airtable HackerOne Bug Bounty"
@@ -158,5 +164,22 @@ profiles:
         - "automatic_submission"
       notes:
         - "Official Airtable security.txt references the public HackerOne bug bounty program."
-        - "Official HackerOne policy snippet indicates testing should be limited to staging.airtable.com and not production airtable.com."
-        - "This profile is restricted to low-rate, read-only probing until fuller policy extraction is available."
+        - "Airtable HackerOne scope page reviewed on June 25, 2026 lists staging.airtable.com, api-staging.airtable.com, mcp.staging.airtable.com, airtable.js, @airtable/mcp-cli, and wildcard *.staging.airtable.com in scope."
+        - "The same scope page explicitly warns not to test production airtable.com and to use endpointUrl https://api-staging.airtable.com for API testing."
+        - "This profile is still restricted to low-rate, read-only probing. Only explicitly listed hosts from the wildcard family are enabled here; no wildcard host enumeration, no active scan, and no port scan are enabled."
+        - "Read-only browser evidence and browser-based public-surface comparison are allowed only with explicit manual approval."
+
+    session_profiles:
+      airtable-staging-api-key:
+        kind: "static_bearer_token"
+        login_url: "https://staging.airtable.com/account"
+        username_default: "staging-api-key-operator"
+        username_env: "BB_AIRTABLE_STAGING_ACCOUNT_EMAIL"
+        token_env: "BB_AIRTABLE_STAGING_API_KEY"
+        auth_header_name: "Authorization"
+        auth_header_prefix: "Bearer"
+        role_hint: "api_key"
+        notes:
+          - "Generate the API key from your own authorized staging account at https://staging.airtable.com/account."
+          - "Use endpointUrl https://api-staging.airtable.com when testing Airtable Web API clients."
+          - "Only run read-only requests with self-owned test data and explicit manual approval."

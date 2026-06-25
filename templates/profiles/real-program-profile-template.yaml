@@ -61,4 +61,19 @@ policy:
     - "Do not set authorization.confirmed to true until you have explicit scope and policy review."
     - "Keep risky capabilities disabled by default."
 
-session_profiles: {}
+session_profiles:
+  # Example token-backed session profile for your own authorized program account.
+  # Replace names and env vars as needed, or remove this block entirely if the
+  # program does not allow authenticated testing.
+  example-api-token:
+    kind: "static_bearer_token"
+    login_url: "https://target.example.com/account"
+    username_default: "authorized-operator"
+    username_env: "BB_TARGET_ACCOUNT_EMAIL"
+    token_env: "BB_TARGET_API_TOKEN"
+    auth_header_name: "Authorization"
+    auth_header_prefix: "Bearer"
+    role_hint: "api_token"
+    notes:
+      - "Only use self-created, explicitly authorized program accounts."
+      - "Keep requests read-only unless the policy clearly allows more."

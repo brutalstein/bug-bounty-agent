@@ -49,6 +49,7 @@ class ValidationPlanner:
         run_data = self._read_json(self.run_dir / "run.json")
         endpoint_validation = self._read_json(self.parsed_dir / "endpoint_validation.json")
         js_analysis = self._read_json(self.parsed_dir / "js_analysis.json")
+        browser_surface_compare = self._read_json(self.parsed_dir / "browser_surface_compare.json")
         triage_candidates = self._read_json(self.parsed_dir / "triage_candidates.json")
 
         target = run_data.get("target_url", "unknown") if isinstance(run_data, dict) else "unknown"
@@ -60,6 +61,9 @@ class ValidationPlanner:
 
         if isinstance(js_analysis, dict):
             items.extend(self._items_from_js_analysis(js_analysis))
+
+        if isinstance(browser_surface_compare, dict):
+            items.extend(self._items_from_browser_surface_compare(browser_surface_compare))
 
         if isinstance(triage_candidates, list):
             items.extend(self._items_from_triage_candidates(triage_candidates))
@@ -300,9 +304,12 @@ class ValidationPlanner:
         for asset in assets:
             url = str(asset.get("url", "unknown"))
             risk_score = int(asset.get("risk_score", 0))
+            source_kind = str(asset.get("source_kind", "unknown"))
             discovered_paths = asset.get("discovered_paths", [])
+            in_scope_full_urls = asset.get("in_scope_full_urls", [])
             keywords = asset.get("interesting_keywords", [])
             source_maps = asset.get("source_maps", [])
+            config_signals = asset.get("config_signals", [])
 
             if risk_score >= 20:
                 priority = "high"
@@ -330,9 +337,12 @@ class ValidationPlanner:
                         manual_approval_required=False,
                         evidence_refs=[
                             f"risk_score={risk_score}",
+                            f"source_kind={source_kind}",
                             f"discovered_paths_count={len(discovered_paths)}",
+                            f"in_scope_full_urls_count={len(in_scope_full_urls)}",
                             f"interesting_keywords_count={len(keywords)}",
                             f"source_maps_count={len(source_maps)}",
+                            f"config_signals_count={len(config_signals)}",
                         ],
                         notes="JS analysis improves prioritization but does not prove vulnerability.",
                     )
@@ -362,6 +372,86 @@ class ValidationPlanner:
                 )
 
         return items
+
+    def _items_from_browser_surface_compare(self, browser_surface_compare: dict) -> list[ValidationPlanItem]:
+        hypotheses = browser_surface_compare.get("hypotheses", [])
+        items: list[ValidationPlanItem] = []
+
+        if not isinstance(hypotheses, list):
+            return items
+
+        for item in hypotheses:
+            hypothesis_id = str(item.get("hypothesis_id", "unknown"))
+            severity = str(item.get("severity", "medium")).lower()
+            title = str(item.get("title", "Browser surface hypothesis"))
+            rationale = str(item.get("rationale", ""))
+            affected_surfaces = item.get("affected_surfaces", [])
+            supporting_signals = item.get("supporting_signals", [])
+            safe_next_steps = item.get("safe_next_steps", [])
+
+            target = "unknown"
+            if isinstance(affected_surfaces, list) and affected_surfaces:
+                target = str(affected_surfaces[0])
+
+            if "storage" in title.lower():
+                category = "browser_storage_session_review"
+            elif "persist across multiple anonymous surfaces" in title.lower():
+                category = "cross_surface_cookie_scope_review"
+            else:
+                category = "browser_cookie_bootstrap_review"
+
+            priority_map = {
+                "high": "high",
+                "medium": "high",
+                "low": "medium",
+            }
+            priority = priority_map.get(severity, "medium")
+
+            items.append(
+                ValidationPlanItem(
+                    item_id=self._make_id("browser-surface", hypothesis_id, target),
+                    priority=priority,
+                    reportability="needs_manual_validation",
+                    category=category,
+                    target=target,
+                    source="browser_surface_compare",
+                    reason=title,
+                    safe_validation_steps=(
+                        safe_next_steps
+                        if isinstance(safe_next_steps, list) and safe_next_steps
+                        else [
+                            "Keep this review read-only and compare the browser state across a second public surface.",
+                            "Verify whether the cookies or storage keys represent anonymous bootstrap state or stronger session state.",
+                            "Do not attempt session manipulation or authenticated abuse without explicit policy allowance.",
+                        ]
+                    ),
+                    manual_approval_required=True,
+                    evidence_refs=self._browser_surface_evidence_refs(
+                        hypothesis_id=hypothesis_id,
+                        severity=severity,
+                        supporting_signals=supporting_signals,
+                    ),
+                    notes=rationale,
+                )
+            )
+
+        return items
+
+    def _browser_surface_evidence_refs(
+        self,
+        hypothesis_id: str,
+        severity: str,
+        supporting_signals: list | object,
+    ) -> list[str]:
+        refs = [
+            f"hypothesis_id={hypothesis_id}",
+            f"severity={severity}",
+        ]
+
+        if isinstance(supporting_signals, list):
+            refs.extend(str(signal) for signal in supporting_signals)
+
+        return refs
 
     def _items_from_triage_candidates(self, triage_candidates: list[dict]) -> list[ValidationPlanItem]:
         items: list[ValidationPlanItem] = []

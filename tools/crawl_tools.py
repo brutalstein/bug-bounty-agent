@@ -15,6 +15,8 @@ from core.run_context import RunContext
 @dataclass
 class DiscoveredPage:
     url: str
+    requested_url: str
+    final_url: str | None
     status_code: int | None
     title: str | None
     content_type: str | None
@@ -85,31 +87,52 @@ class CrawlTools:
         self.scope.assert_action_allowed(start_url, method="GET")
 
         queue = [start_url]
-        visited: set[str] = set()
+        seen: set[str] = set()
+        processed_effective: set[str] = set()
         discovered: set[str] = set()
         pages: list[dict] = []
         forms: list[dict] = []
         scripts: set[str] = set()
 
-        while queue and len(visited) < max_pages:
+        while queue and len(pages) < max_pages:
             current_url = queue.pop(0)
             current_url = self._clean_url(current_url)
 
-            if current_url in visited:
+            if current_url in seen:
                 continue
 
             if not self.scope.is_target_allowed(current_url):
                 continue
 
-            visited.add(current_url)
+            seen.add(current_url)
 
             response = self.client.get(current_url, headers=headers)
+            effective_url = self._clean_url(response.final_url or current_url)
 
-            if self._is_html_response(response.content_type, response.body):
+            if effective_url:
+                seen.add(effective_url)
+
+            if effective_url and effective_url in processed_effective:
+                time.sleep(delay_seconds)
+                continue
+
+            redirected_out_of_scope = (
+                effective_url != current_url and not self.scope.is_target_allowed(effective_url)
+            )
+
+            page_base_url = effective_url or current_url
+            processed_effective.add(page_base_url)
+
+            if redirected_out_of_scope:
+                title = None
+                links = []
+                page_forms = []
+                page_scripts = []
+            elif self._is_html_response(response.content_type, response.body):
                 title = self._extract_title(response.body)
-                links = self._extract_links(current_url, response.body)
-                page_forms = self._extract_forms(current_url, response.body)
-                page_scripts = self._extract_scripts(current_url, response.body)
+                links = self._extract_links(page_base_url, response.body)
+                page_forms = self._extract_forms(page_base_url, response.body)
+                page_scripts = self._extract_scripts(page_base_url, response.body)
             else:
                 title = None
                 links = []
@@ -121,24 +144,26 @@ class CrawlTools:
             scripts.update(page_scripts)
 
             page = DiscoveredPage(
-                url=current_url,
+                url=page_base_url,
+                requested_url=current_url,
+                final_url=response.final_url,
                 status_code=response.status_code,
                 title=title,
                 content_type=response.content_type,
                 links_count=len(links),
                 forms_count=len(page_forms),
                 scripts_count=len(page_scripts),
-                success=response.success,
-                error=response.error,
+                success=response.success and not redirected_out_of_scope,
+                error="redirected_out_of_scope" if redirected_out_of_scope else response.error,
             )
 
             pages.append(page.to_dict())
 
-            safe_name = self._safe_filename(current_url)
+            safe_name = self._safe_filename(page_base_url)
             self._save_raw(f"{raw_prefix}_{safe_name}.html", response.body)
 
             for link in links:
-                if link not in visited and link not in queue:
+                if link not in seen and link not in queue:
                     if self.scope.is_target_allowed(link) and self._should_queue_page_url(link):
                         queue.append(link)
 
@@ -146,7 +171,7 @@ class CrawlTools:
 
         result = CrawlResult(
             start_url=start_url,
-            visited_count=len(visited),
+            visited_count=len(pages),
             discovered_urls=sorted(discovered),
             pages=pages,
             forms=forms,
@@ -162,7 +187,7 @@ class CrawlTools:
             message="Safe crawl completed.",
             data={
                 "start_url": start_url,
-                "visited_count": len(visited),
+                "visited_count": len(pages),
                 "discovered_count": len(discovered),
                 "forms_count": len(forms),
                 "scripts_count": len(scripts),

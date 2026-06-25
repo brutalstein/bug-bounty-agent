@@ -100,7 +100,7 @@ class AuthenticatedCrawlRunner:
 
         self.ctx.add_event(
             event_type="authenticated_crawl_completed",
-            message="Authenticated lab crawl completed.",
+            message="Authenticated crawl completed.",
             data={
                 "session_profile_name": session.artifact.session_profile_name,
                 "baseline_visited_count": summary.baseline_visited_count,
@@ -122,7 +122,7 @@ class AuthenticatedCrawlRunner:
 
         lines.append("# Authenticated Crawl")
         lines.append("")
-        lines.append("> Manual-approval, lab-only authenticated crawl summary. This does not confirm a vulnerability.")
+        lines.append("> Manual-approval authenticated crawl summary. This does not confirm a vulnerability.")
         lines.append("")
         lines.append("## Summary")
         lines.append("")
