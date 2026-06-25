@@ -52,10 +52,14 @@ Or bootstrap only:
 Use local copies of official policy documents first:
 
 ```bash
+python app/main.py policy-fetch https://about.gitlab.com/security/disclosure/ --slug gitlab-disclosure
+
+python app/main.py policy-parse runs/policy-fetch/<bundle>/normalized_policy_source.txt
+
 python app/main.py policy-parse templates/policies/real-program-policy-notes-template.md
 
 python app/main.py program-onboard \
-  templates/policies/real-program-policy-notes-template.md \
+  runs/policy-fetch/<bundle>/normalized_policy_source.txt \
   example-program \
   https://target.example.com \
   --allowed-host target.example.com \

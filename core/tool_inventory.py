@@ -46,12 +46,15 @@ class ToolInventory:
         for group_name, tools in groups.items():
             for tool in tools:
                 command = tool["command"]
-                path = shutil.which(command)
+                path = self._resolve_command_path(
+                    command,
+                    tool.get("alternatives", []),
+                )
                 available = path is not None
 
                 version_output = None
                 if available:
-                    version_output = self._get_version(command)
+                    version_output = self._get_version(path)
 
                 results.append(
                     ToolCheck(
@@ -104,6 +107,28 @@ class ToolInventory:
 
             except Exception:
                 continue
+
+        return None
+
+    def _resolve_command_path(self, command: str, alternatives: list | None = None) -> str | None:
+        candidates = [command, *(alternatives or [])]
+
+        for candidate in candidates:
+            candidate_text = str(candidate).strip()
+            if not candidate_text:
+                continue
+
+            if "/" in candidate_text:
+                candidate_path = Path(candidate_text)
+                if not candidate_path.is_absolute():
+                    candidate_path = PROJECT_ROOT / candidate_path
+                if candidate_path.exists():
+                    return str(candidate_path)
+                continue
+
+            resolved = shutil.which(candidate_text)
+            if resolved:
+                return resolved
 
         return None
 

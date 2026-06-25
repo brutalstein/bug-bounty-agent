@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, asdict
+from html.parser import HTMLParser
 from pathlib import Path
 import json
 import re
@@ -119,6 +120,9 @@ class PolicyParser:
 
     def _parse_text_file(self, path: Path) -> ParsedPolicy:
         content = path.read_text(encoding="utf-8", errors="ignore")
+        if path.suffix.lower() in {".html", ".htm"} or "<html" in content[:1000].lower():
+            content = self._html_to_text(content)
+
         lines = [line.strip() for line in content.splitlines() if line.strip()]
         lowered = content.lower()
 
@@ -193,10 +197,41 @@ class PolicyParser:
         )
 
     def _extract_program_name(self, lines: list[str], fallback: str) -> str:
-        if lines:
-            first = lines[0].lstrip("#").strip()
-            if first:
-                return first[:120]
+        ignored_prefixes = (
+            "source url:",
+            "final url:",
+            "fetched at",
+            "content type:",
+        )
+        keyword_hints = (
+            "bug bounty",
+            "bounty",
+            "policy",
+            "disclosure",
+            "eligible",
+            "security",
+            "hackerone",
+            "faq",
+        )
+
+        for line in lines[:20]:
+            candidate = line.lstrip("#").strip()
+            lowered = candidate.lower()
+            if not candidate:
+                continue
+            if lowered == "fetched policy source":
+                continue
+            if lowered.startswith(ignored_prefixes):
+                continue
+            if any(keyword in lowered for keyword in keyword_hints):
+                return candidate[:120]
+
+        for line in lines[:20]:
+            candidate = line.lstrip("#").strip()
+            lowered = candidate.lower()
+            if candidate and lowered != "fetched policy source" and not lowered.startswith(ignored_prefixes):
+                return candidate[:120]
+
         return fallback
 
     def _extract_first_url(self, content: str) -> str:
@@ -229,3 +264,58 @@ class PolicyParser:
     def _line_matches_any(self, line: str, keywords: list[str]) -> bool:
         lowered = line.lower()
         return any(keyword in lowered for keyword in keywords)
+
+    def _html_to_text(self, content: str) -> str:
+        class _Extractor(HTMLParser):
+            block_tags = {
+                "p",
+                "div",
+                "section",
+                "article",
+                "header",
+                "footer",
+                "main",
+                "aside",
+                "nav",
+                "ul",
+                "ol",
+                "li",
+                "br",
+                "tr",
+                "table",
+                "h1",
+                "h2",
+                "h3",
+                "h4",
+                "h5",
+                "h6",
+            }
+            skip_tags = {"script", "style", "noscript", "svg"}
+
+            def __init__(self) -> None:
+                super().__init__(convert_charrefs=True)
+                self.parts: list[str] = []
+                self.skip_depth = 0
+
+            def handle_starttag(self, tag: str, attrs) -> None:  # noqa: ANN001
+                if tag in self.skip_tags:
+                    self.skip_depth += 1
+                    return
+                if self.skip_depth == 0 and tag in self.block_tags:
+                    self.parts.append("\n")
+
+            def handle_endtag(self, tag: str) -> None:
+                if tag in self.skip_tags and self.skip_depth > 0:
+                    self.skip_depth -= 1
+                    return
+                if self.skip_depth == 0 and tag in self.block_tags:
+                    self.parts.append("\n")
+
+            def handle_data(self, data: str) -> None:
+                if self.skip_depth == 0 and data.strip():
+                    self.parts.append(data)
+
+        parser = _Extractor()
+        parser.feed(content)
+        lines = [re.sub(r"\s+", " ", line).strip() for line in "".join(parser.parts).splitlines()]
+        return "\n".join(line for line in lines if line)

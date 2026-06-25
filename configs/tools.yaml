@@ -2,6 +2,9 @@ tool_groups:
   core:
     - name: "python"
       command: "python"
+      alternatives:
+        - "python3"
+        - ".venv/bin/python"
       required: true
       purpose: "Project runtime"
 

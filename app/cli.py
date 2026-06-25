@@ -11,6 +11,7 @@ from core.authenticated_crawl import AuthenticatedCrawlRunner
 from core.browser_evidence import BrowserEvidenceBuilder, check_browser_runtime
 from core.console import ConsoleSpinner, print_banner, print_status
 from core.lab_manager import LabManager
+from core.policy_fetcher import PolicyFetcher
 from core.policy_parser import PolicyParser
 from core.preflight import PreflightChecker
 from core.profile_readiness import ProfileReadinessAssessor
@@ -213,6 +214,7 @@ def command_doctor(_: argparse.Namespace) -> int:
         PROJECT_ROOT / "core" / "console.py",
         PROJECT_ROOT / "core" / "session_compare.py",
         PROJECT_ROOT / "core" / "lab_manager.py",
+        PROJECT_ROOT / "core" / "policy_fetcher.py",
         PROJECT_ROOT / "core" / "policy_parser.py",
         PROJECT_ROOT / "core" / "preflight.py",
         PROJECT_ROOT / "core" / "profile_readiness.py",
@@ -347,6 +349,24 @@ def command_policy_parse(args: argparse.Namespace) -> int:
         else:
             print_info("Generated profile stub:")
             print(stub_text)
+
+    return 0
+
+
+def command_policy_fetch(args: argparse.Namespace) -> int:
+    fetcher = PolicyFetcher(args.output_dir)
+    result = fetcher.fetch(args.policy_url, slug=args.slug)
+
+    print_ok("Policy source fetched.")
+    print_info(f"Source URL: {result.source_url}")
+    print_info(f"Final URL: {result.final_url}")
+    print_info(f"HTTP status: {result.status_code}")
+    print_info(f"Content type: {result.content_type}")
+    print_info(f"Bundle directory: {result.bundle_dir}")
+    print_info(f"Raw source: {result.raw_path}")
+    print_info(f"Normalized text: {result.normalized_text_path}")
+    print_info(f"Metadata: {result.metadata_path}")
+    print_info("Next step: run `policy-parse` or `program-onboard` against the normalized text file after manual scope review.")
 
     return 0
 
@@ -1673,6 +1693,19 @@ def build_parser() -> argparse.ArgumentParser:
     policy_parser.add_argument("--base-url", help="Base URL to include in the generated profile stub")
     policy_parser.add_argument("--output-profile-stub", help="Optional output path for generated profile YAML")
     policy_parser.set_defaults(func=command_policy_parse)
+
+    fetch_parser = subparsers.add_parser(
+        "policy-fetch",
+        help="Fetch an official policy page into a local review-first artifact bundle",
+    )
+    fetch_parser.add_argument("policy_url", help="Official bug bounty policy or disclosure URL")
+    fetch_parser.add_argument("--slug", help="Optional bundle slug override")
+    fetch_parser.add_argument(
+        "--output-dir",
+        default="runs/policy-fetch",
+        help="Directory where fetched policy bundles should be written",
+    )
+    fetch_parser.set_defaults(func=command_policy_fetch)
 
     readiness_parser = subparsers.add_parser(
         "profile-readiness",
