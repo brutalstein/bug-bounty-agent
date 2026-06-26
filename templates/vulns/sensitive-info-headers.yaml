@@ -1,0 +1,25 @@
+id: sensitive-info-headers
+
+info:
+  name: Sensitive Server Version Disclosure in Headers
+  author: bug-bounty-agent
+  severity: low
+  description: Response headers disclose server or framework versions
+  metadata:
+    bounty_value: "$"
+  tags: headers,disclosure,info,bounty
+
+http:
+  - method: GET
+    path:
+      - "{{BaseURL}}/"
+    matchers-condition: or
+    matchers:
+      - type: regex
+        part: header
+        regex:
+          - "Server: (Apache|nginx|IIS|LiteSpeed)/[0-9]"
+          - "X-Powered-By: PHP/[0-9]"
+          - "X-AspNet-Version: [0-9]"
+          - "X-AspNetMvc-Version: [0-9]"
+    stop-at-first-match: true

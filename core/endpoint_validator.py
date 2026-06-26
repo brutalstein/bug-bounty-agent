@@ -25,6 +25,9 @@ class EndpointValidationResult:
     response_time_seconds: float
     response_bytes: int
     accessible: bool
+    auth_behavior: str
+    auth_signal: str | None
+    auth_signal_confidence: float | None
     auth_likely_required: bool
     redirect_likely: bool
     interesting: bool
@@ -56,6 +59,9 @@ class EndpointValidationSummary:
 
 
 class EndpointValidator:
+    FAKE_JWT_NONE = "eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJpZCI6MX0."
+    FAKE_BEARER = "Bearer invalid_expired_token_test_only"
+
     def __init__(self, scope: ScopeManager, run_context: RunContext):
         self.scope = scope
         self.ctx = run_context
@@ -271,6 +277,13 @@ class EndpointValidator:
 
         accessible = status_code is not None and 200 <= status_code < 400
         redirect_likely = status_code is not None and 300 <= status_code < 400
+        auth_behavior = self._classify_auth_behavior(
+            url=url,
+            category=category,
+            initial_status=status_code,
+            initial_body=body,
+            initial_content_type=response.content_type,
+        )
         auth_likely_required = self._auth_likely_required(
             url=url,
             status_code=status_code,
@@ -318,6 +331,9 @@ class EndpointValidator:
             response_time_seconds=response.response_time_seconds,
             response_bytes=len(body),
             accessible=accessible,
+            auth_behavior=auth_behavior["auth_behavior"],
+            auth_signal=auth_behavior.get("signal"),
+            auth_signal_confidence=auth_behavior.get("confidence"),
             auth_likely_required=auth_likely_required,
             redirect_likely=redirect_likely,
             interesting=interesting,
@@ -328,6 +344,74 @@ class EndpointValidator:
             response_sample=redacted_sample,
             error=response.error,
         )
+
+    def _classify_auth_behavior(
+        self,
+        url: str,
+        category: str,
+        initial_status: int | None,
+        initial_body: str,
+        initial_content_type: str | None,
+    ) -> dict:
+        probe_categories = {
+            "admin_or_privileged_area",
+            "authentication_surface",
+            "user_data_surface",
+            "business_logic_surface",
+            "api_surface",
+        }
+        allow_fake_token_probe = (
+            category in probe_categories
+            and (self.scope.is_lab_profile() or self.scope.config.rules.allow_active_scan)
+        )
+        initial_size = len(initial_body.encode("utf-8"))
+        api_like = self._looks_like_api_response(url, initial_content_type, initial_body)
+
+        if initial_status == 404:
+            return {"auth_behavior": "not_found", "signal": None, "confidence": None}
+
+        if initial_status == 200 and initial_size > 100:
+            result = {
+                "auth_behavior": "open",
+                "signal": "unauthenticated_api_access" if api_like else None,
+                "confidence": 0.75 if api_like else 0.6,
+            }
+            if not allow_fake_token_probe or not api_like:
+                return result
+
+            self.scope.assert_action_allowed(url, method="GET")
+            fake = self.client.get(url, headers={"Authorization": self.FAKE_BEARER})
+            fake_size = len((fake.body or "").encode("utf-8"))
+            if fake.status_code == 200 and fake_size > 100:
+                return result
+            return result
+
+        if initial_status in {401, 403}:
+            if not allow_fake_token_probe:
+                return {"auth_behavior": "requires_auth", "signal": None, "confidence": None}
+
+            self.scope.assert_action_allowed(url, method="GET")
+            fake = self.client.get(
+                url,
+                headers={
+                    "Authorization": self.FAKE_BEARER,
+                    "X-Test-JWT": self.FAKE_JWT_NONE,
+                },
+            )
+            fake_size = len((fake.body or "").encode("utf-8"))
+            if fake.status_code == 200 and fake_size > 100:
+                return {
+                    "auth_behavior": "open_with_fake_token",
+                    "signal": "auth_bypass_candidate",
+                    "confidence": 0.85,
+                }
+            return {"auth_behavior": "requires_auth", "signal": None, "confidence": None}
+
+        return {
+            "auth_behavior": "unknown",
+            "signal": None,
+            "confidence": None if initial_status is None else 0.2,
+        }
 
     def _to_absolute_url(self, value: str) -> str:
         value = value.strip()
@@ -604,6 +688,15 @@ class EndpointValidator:
 
         cleaned = re.sub(r"\s+", " ", body).strip()
         return cleaned[:limit]
+
+    def _looks_like_api_response(self, url: str, content_type: str | None, body: str) -> bool:
+        lowered_url = url.lower()
+        lowered_type = (content_type or "").lower()
+        if "json" in lowered_type or any(token in lowered_url for token in ["/api/", "/graphql", "/rest/"]):
+            return True
+
+        trimmed = body.strip()
+        return trimmed.startswith("{") or trimmed.startswith("[")
 
     def _is_static_asset(self, url: str) -> bool:
         path = urlparse(url).path.lower()

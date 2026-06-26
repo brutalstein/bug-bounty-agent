@@ -28,6 +28,7 @@ class JSAssetAnalysis:
     source_maps: list[str]
     interesting_keywords: list[str]
     config_signals: list[str]
+    pattern_findings: list[dict]
     risk_score: int
     notes: list[str]
 
@@ -47,6 +48,7 @@ class JSAnalysisSummary:
     total_source_maps: int
     total_interesting_keywords: int
     total_config_signals: int
+    total_pattern_findings: int
     assets: list[dict]
     skipped: list[dict]
 
@@ -55,6 +57,50 @@ class JSAnalysisSummary:
 
 
 class JSAnalyzer:
+    IDOR_PATTERNS: list[tuple[str, str, float]] = [
+        (r"/api/\w+/\d+", "idor_candidate", 0.7),
+        (r"/api/\w+/[a-f0-9-]{36}", "idor_candidate", 0.72),
+        (r"\?(?:id|user_id|account_id|order_id)=\d+", "idor_candidate", 0.68),
+        (r"\?(?:userId|customerId)=[^&\"'`\s]+", "idor_candidate", 0.68),
+    ]
+    AUTH_SURFACE_PATTERNS: list[tuple[str, str, float]] = [
+        (r"/admin", "auth_surface_candidate", 0.65),
+        (r"/administrator", "auth_surface_candidate", 0.65),
+        (r"/manage", "auth_surface_candidate", 0.62),
+        (r"/management", "auth_surface_candidate", 0.62),
+        (r"/internal", "auth_surface_candidate", 0.6),
+        (r"/api/admin", "auth_surface_candidate", 0.7),
+        (r"/api/internal", "auth_surface_candidate", 0.7),
+        (r"/api/v\d+/admin", "auth_surface_candidate", 0.72),
+        (r"/oauth2?", "auth_surface_candidate", 0.58),
+        (r"/token", "auth_surface_candidate", 0.58),
+        (r"/refresh", "auth_surface_candidate", 0.58),
+        (r"/session", "auth_surface_candidate", 0.58),
+        (r"/api/auth", "auth_surface_candidate", 0.62),
+        (r"/auth/", "auth_surface_candidate", 0.58),
+    ]
+    SSRF_PARAM_PATTERNS: list[tuple[str, str, float]] = [
+        (r"\?(?:url|redirect|next|dest|target|src|source|callback)=", "ssrf_param_candidate", 0.55),
+        (r"\?(?:return|returnUrl|returnTo|ref|forward|location)=", "ssrf_param_candidate", 0.5),
+    ]
+    SENSITIVE_KEYWORD_PATTERNS: list[tuple[str, str, float]] = [
+        (r"password", "sensitive_keyword_candidate", 0.45),
+        (r"passwd", "sensitive_keyword_candidate", 0.45),
+        (r"secret", "sensitive_keyword_candidate", 0.45),
+        (r"api[_-]?key", "sensitive_keyword_candidate", 0.55),
+        (r"private[_-]?key", "sensitive_keyword_candidate", 0.6),
+        (r"access[_-]?token", "sensitive_keyword_candidate", 0.55),
+        (r"auth[_-]?token", "sensitive_keyword_candidate", 0.55),
+        (r"bearer", "sensitive_keyword_candidate", 0.45),
+        (r"\.env", "sensitive_keyword_candidate", 0.5),
+        (r"config\.", "sensitive_keyword_candidate", 0.42),
+        (r"credentials", "sensitive_keyword_candidate", 0.5),
+        (r"private", "sensitive_keyword_candidate", 0.4),
+        (r"internal", "sensitive_keyword_candidate", 0.4),
+        (r"admin", "sensitive_keyword_candidate", 0.4),
+        (r"superuser", "sensitive_keyword_candidate", 0.55),
+        (r"root", "sensitive_keyword_candidate", 0.45),
+    ]
     CONFIG_SIGNAL_KEYS = [
         "apiHost",
         "apiVersion",
@@ -137,6 +183,7 @@ class JSAnalyzer:
             total_source_maps=sum(len(asset.get("source_maps", [])) for asset in assets),
             total_interesting_keywords=sum(len(asset.get("interesting_keywords", [])) for asset in assets),
             total_config_signals=sum(len(asset.get("config_signals", [])) for asset in assets),
+            total_pattern_findings=sum(len(asset.get("pattern_findings", [])) for asset in assets),
             assets=assets,
             skipped=skipped,
         )
@@ -157,6 +204,7 @@ class JSAnalyzer:
                 "total_source_maps": summary.total_source_maps,
                 "total_interesting_keywords": summary.total_interesting_keywords,
                 "total_config_signals": summary.total_config_signals,
+                "total_pattern_findings": summary.total_pattern_findings,
             },
         )
 
@@ -265,6 +313,7 @@ class JSAnalyzer:
         source_maps = self._extract_source_maps(body)
         interesting_keywords = self._extract_interesting_keywords(body)
         config_signals = self._extract_config_signals(body)
+        pattern_findings = self._extract_pattern_findings(body, url)
         risk_score = self._score_asset(
             url=url,
             source_kind=source_kind,
@@ -273,6 +322,7 @@ class JSAnalyzer:
             source_maps=source_maps,
             interesting_keywords=interesting_keywords,
             config_signals=config_signals,
+            pattern_findings=pattern_findings,
         )
         notes = self._build_notes(
             source_kind=source_kind,
@@ -281,6 +331,7 @@ class JSAnalyzer:
             source_maps=source_maps,
             interesting_keywords=interesting_keywords,
             config_signals=config_signals,
+            pattern_findings=pattern_findings,
         )
 
         return JSAssetAnalysis(
@@ -297,6 +348,7 @@ class JSAnalyzer:
             source_maps=source_maps,
             interesting_keywords=interesting_keywords,
             config_signals=config_signals,
+            pattern_findings=pattern_findings,
             risk_score=risk_score,
             notes=notes,
         )
@@ -405,6 +457,45 @@ class JSAnalyzer:
 
         return sorted(signals)
 
+    def _extract_pattern_findings(self, body: str, source_url: str) -> list[dict]:
+        if not body:
+            return []
+
+        source_asset = Path(urlparse(source_url).path).name or source_url
+        findings: list[dict] = []
+        seen: set[tuple[str, str]] = set()
+        pattern_groups = (
+            self.IDOR_PATTERNS,
+            self.AUTH_SURFACE_PATTERNS,
+            self.SSRF_PARAM_PATTERNS,
+            self.SENSITIVE_KEYWORD_PATTERNS,
+        )
+
+        for group in pattern_groups:
+            for pattern, pattern_type, confidence in group:
+                for match in re.finditer(pattern, body, flags=re.IGNORECASE):
+                    value = str(match.group(0)).strip()
+                    if not value:
+                        continue
+                    clean_value = value[:180]
+                    key = (pattern_type, clean_value.lower())
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    findings.append(
+                        {
+                            "pattern_type": pattern_type,
+                            "matched_value": clean_value,
+                            "source_asset": source_asset,
+                            "confidence": confidence,
+                        }
+                    )
+
+        return sorted(
+            findings,
+            key=lambda item: (item["pattern_type"], -float(item["confidence"]), item["matched_value"]),
+        )
+
     def _score_asset(
         self,
         url: str,
@@ -414,6 +505,7 @@ class JSAnalyzer:
         source_maps: list[str],
         interesting_keywords: list[str],
         config_signals: list[str],
+        pattern_findings: list[dict],
     ) -> int:
         score = 0
 
@@ -431,6 +523,7 @@ class JSAnalyzer:
         score += min(len(source_maps) * 3, 9)
         score += min(len(interesting_keywords), 10)
         score += min(len(config_signals), 8)
+        score += min(len(pattern_findings) * 2, 12)
 
         if any("auth:" in item for item in interesting_keywords):
             score += 3
@@ -447,6 +540,15 @@ class JSAnalyzer:
         if any(signal.startswith("vercelGitRef=") for signal in config_signals):
             score += 1
 
+        if any(item.get("pattern_type") == "idor_candidate" for item in pattern_findings):
+            score += 3
+
+        if any(item.get("pattern_type") == "auth_surface_candidate" for item in pattern_findings):
+            score += 3
+
+        if any(item.get("pattern_type") == "ssrf_param_candidate" for item in pattern_findings):
+            score += 2
+
         return score
 
     def _build_notes(
@@ -457,6 +559,7 @@ class JSAnalyzer:
         source_maps: list[str],
         interesting_keywords: list[str],
         config_signals: list[str],
+        pattern_findings: list[dict],
     ) -> list[str]:
         notes = []
 
@@ -474,6 +577,9 @@ class JSAnalyzer:
 
         if config_signals:
             notes.append("Framework or app config signals were extracted for manual review.")
+
+        if pattern_findings:
+            notes.append("Structured JS pattern findings highlight possible IDOR, auth, SSRF, or sensitive-keyword routes.")
 
         if interesting_keywords:
             notes.append("JavaScript contains security-relevant keywords. Review context manually.")

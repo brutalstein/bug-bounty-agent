@@ -1,0 +1,40 @@
+id: admin-panel-exposure
+
+info:
+  name: Admin Panel Accessible Without Authentication
+  author: bug-bounty-agent
+  severity: high
+  description: Admin or management interface appears reachable without an auth challenge
+  metadata:
+    bounty_value: "$$$"
+  tags: admin,exposure,bounty,access-control
+
+http:
+  - method: GET
+    path:
+      - "{{BaseURL}}/admin"
+      - "{{BaseURL}}/admin/"
+      - "{{BaseURL}}/administrator"
+      - "{{BaseURL}}/manage"
+      - "{{BaseURL}}/management"
+      - "{{BaseURL}}/panel"
+      - "{{BaseURL}}/backend"
+      - "{{BaseURL}}/cms"
+      - "{{BaseURL}}/dashboard"
+      - "{{BaseURL}}/control"
+      - "{{BaseURL}}/cp"
+      - "{{BaseURL}}/admincp"
+    matchers-condition: and
+    matchers:
+      - type: status
+        status:
+          - 200
+      - type: word
+        words:
+          - "Login"
+          - "Unauthorized"
+          - "Forbidden"
+          - "Access Denied"
+        negative: true
+        condition: and
+    stop-at-first-match: true

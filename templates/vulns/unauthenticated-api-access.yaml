@@ -1,0 +1,46 @@
+id: unauthenticated-api-access
+
+info:
+  name: Unauthenticated API Endpoint Access
+  author: bug-bounty-agent
+  severity: medium
+  description: API endpoint returns user or account-shaped data without authentication
+  metadata:
+    bounty_value: "$$"
+  tags: api,exposure,bounty,unauthenticated
+
+http:
+  - method: GET
+    path:
+      - "{{BaseURL}}/api/users"
+      - "{{BaseURL}}/api/user"
+      - "{{BaseURL}}/api/accounts"
+      - "{{BaseURL}}/api/config"
+      - "{{BaseURL}}/api/settings"
+      - "{{BaseURL}}/rest/users"
+      - "{{BaseURL}}/rest/user"
+      - "{{BaseURL}}/v1/users"
+      - "{{BaseURL}}/v2/users"
+      - "{{BaseURL}}/v1/accounts"
+    matchers-condition: and
+    matchers:
+      - type: status
+        status:
+          - 200
+      - type: word
+        words:
+          - '"id"'
+          - '"email"'
+          - '"username"'
+          - '"user_id"'
+          - '"account"'
+        condition: or
+      - type: word
+        words:
+          - "Unauthorized"
+          - "Forbidden"
+          - "401"
+          - "403"
+        negative: true
+        part: body
+    stop-at-first-match: true

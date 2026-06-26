@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, asdict
 from pathlib import Path
+from urllib.parse import urlparse
 import json
+import re
 
 from core.scope import ScopeManager
 from core.run_context import RunContext
@@ -140,12 +142,15 @@ class ProjectDiscoveryTools:
         if not template_path.exists():
             raise FileNotFoundError(f"Nuclei template not found: {template_path}")
 
+        template_args = self._build_nuclei_template_args(template_path)
+        if not template_args:
+            raise FileNotFoundError("No scope-safe nuclei templates are available for the selected profile.")
+
         command = [
             "nuclei",
             "-u",
             target,
-            "-t",
-            str(template_path),
+            *template_args,
             "-severity",
             severities,
             "-rl",
@@ -238,6 +243,40 @@ class ProjectDiscoveryTools:
         )
 
         return result
+
+    def _build_nuclei_template_args(self, lab_template_path: Path) -> list[str]:
+        templates: list[Path] = []
+
+        if lab_template_path.exists():
+            templates.append(lab_template_path)
+
+        vuln_dir = PROJECT_ROOT / "templates" / "vulns"
+        if vuln_dir.exists():
+            for template_path in sorted(vuln_dir.glob("*.yaml")):
+                if self._template_is_safe_for_profile(template_path):
+                    templates.append(template_path)
+
+        args: list[str] = []
+        for template_path in templates:
+            args.extend(["-t", str(template_path)])
+        return args
+
+    def _template_is_safe_for_profile(self, template_path: Path) -> bool:
+        try:
+            text = template_path.read_text(encoding="utf-8")
+        except OSError:
+            return False
+
+        paths = re.findall(r"\{\{BaseURL\}\}([^\s\"']+)", text)
+        if not paths:
+            return True
+
+        for raw_path in paths:
+            path_only = urlparse(raw_path).path or "/"
+            if not self.scope.is_path_allowed(path_only):
+                return False
+
+        return True
 
     def _build_result(
         self,

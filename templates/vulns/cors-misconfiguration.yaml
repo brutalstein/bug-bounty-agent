@@ -1,0 +1,31 @@
+id: cors-misconfiguration
+
+info:
+  name: CORS Misconfiguration
+  author: bug-bounty-agent
+  severity: medium
+  description: API returns a wildcard or reflected origin in CORS headers
+  metadata:
+    bounty_value: "$$"
+  tags: cors,misconfiguration,bounty
+
+http:
+  - method: GET
+    path:
+      - "{{BaseURL}}/api/"
+      - "{{BaseURL}}/api/v1/"
+      - "{{BaseURL}}/rest/"
+    headers:
+      Origin: "https://evil.attacker.example"
+    matchers-condition: and
+    matchers:
+      - type: word
+        part: header
+        words:
+          - "Access-Control-Allow-Origin: *"
+          - "Access-Control-Allow-Origin: https://evil.attacker.example"
+        condition: or
+      - type: status
+        status:
+          - 200
+    stop-at-first-match: true

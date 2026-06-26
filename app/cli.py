@@ -2202,13 +2202,21 @@ def command_last_run(_: argparse.Namespace) -> int:
         return 1
 
     run_dir = latest_runs[0]
-    dashboard_path = run_dir / "reports" / "index.md"
+    candidate_reports = [
+        run_dir / "reports" / "index.md",
+        run_dir / "reports" / "review_queue.md",
+        run_dir / "reports" / "final_report_draft.md",
+    ]
     print_ok("Latest run located.")
     print_info(f"Run directory: {run_dir}")
-    print_info(f"Dashboard: {dashboard_path if dashboard_path.exists() else '(missing)'}")
+    selected_report = next((path for path in candidate_reports if path.exists()), None)
+    print_info(f"Dashboard: {selected_report if selected_report else '(missing)'}")
     print_info(f"Review queue: {run_dir / 'reports' / 'review_queue.md'}")
     print_info(f"Signals: {run_dir / 'reports' / 'signals.md'}")
     print_info(f"Deep hunt: {run_dir / 'reports' / 'deep_hunt.md'}")
+    if selected_report is not None:
+        print("")
+        print(selected_report.read_text(encoding="utf-8"))
     return 0
 
 

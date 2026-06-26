@@ -5,6 +5,7 @@ from pathlib import Path
 from urllib.parse import unquote
 import hashlib
 import json
+import re
 
 
 @dataclass
@@ -25,6 +26,17 @@ class TriageCandidate:
 
 
 class TriageEngine:
+    IDOR_PATTERNS = [
+        r"/api/\w+/\d+",
+        r"/api/\w+/[a-f0-9-]{36}",
+        r"\?(?:id|user_id|account_id|order_id)=\d+",
+        r"\?(?:userId|customerId)=[^&]+",
+    ]
+    SSRF_PARAM_PATTERNS = [
+        r"\?(?:url|redirect|next|dest|target|src|source|callback)=",
+        r"\?(?:return|returnUrl|returnTo|ref|forward|location)=",
+    ]
+
     def __init__(self, run_dir: str | Path):
         self.run_dir = Path(run_dir)
         self.parsed_dir = self.run_dir / "parsed"
@@ -115,6 +127,11 @@ class TriageEngine:
             auth_likely_required = result.get("auth_likely_required") is True
             exposure_likely = result.get("exposure_likely") is True
             sensitive_indicators = result.get("sensitive_indicators", [])
+            auth_behavior = str(result.get("auth_behavior", "unknown"))
+            auth_signal = str(result.get("auth_signal", "")).strip()
+            auth_signal_confidence = result.get("auth_signal_confidence")
+            response_sample = str(result.get("response_sample", ""))
+            lowered_url = url.lower()
 
             if exposure_likely:
                 candidates.append(
@@ -134,6 +151,118 @@ class TriageEngine:
                         requires_manual_approval=True,
                         reportable_now=False,
                         notes=f"Sensitive indicators: {sensitive_indicators}",
+                    )
+                )
+                continue
+
+            if auth_behavior == "open_with_fake_token":
+                candidates.append(
+                    TriageCandidate(
+                        candidate_id=self._make_id("endpoint-auth-bypass", url),
+                        priority="critical",
+                        category="potential_auth_bypass",
+                        target=url,
+                        reason="Endpoint behavior changed from protected to accessible when a fake token was supplied. This may indicate an authentication bypass and needs careful human verification.",
+                        source_finding_ids=[],
+                        recommended_safe_actions=[
+                            "Re-check with the same safe read-only request pattern only.",
+                            "Confirm the response contains meaningful protected content, not a generic shell.",
+                            "Keep evidence redacted and avoid chaining or escalation attempts.",
+                        ],
+                        requires_manual_approval=True,
+                        reportable_now=False,
+                        notes=f"Auth signal: {auth_signal or 'auth_bypass_candidate'} | Confidence: {auth_signal_confidence}",
+                    )
+                )
+                continue
+
+            if (
+                any(token in lowered_url for token in ["/admin", "/administrator", "/manage", "/internal", "/api/admin"])
+                and auth_behavior == "open"
+            ):
+                candidates.append(
+                    TriageCandidate(
+                        candidate_id=self._make_id("endpoint-open-admin", url),
+                        priority="critical",
+                        category="potential_unauthenticated_admin_access",
+                        target=url,
+                        reason="Admin or privileged surface appears reachable without authentication.",
+                        source_finding_ids=[],
+                        recommended_safe_actions=[
+                            "Verify response content is truly privileged and not a public login or placeholder page.",
+                            "Capture only minimal read-only evidence such as status, headers, and screenshot if policy permits.",
+                            "Do not attempt any state-changing actions.",
+                        ],
+                        requires_manual_approval=True,
+                        reportable_now=False,
+                        notes=f"Auth behavior: {auth_behavior}",
+                    )
+                )
+                continue
+
+            if (
+                "/api/" in lowered_url
+                and auth_behavior == "open"
+                and self._contains_any(response_sample.lower(), ["\"id\"", "\"email\"", "\"username\"", "\"account\"", "email", "username", "account"])
+            ):
+                candidates.append(
+                    TriageCandidate(
+                        candidate_id=self._make_id("endpoint-open-api-data", url),
+                        priority="high",
+                        category="potential_unauthenticated_api_data_exposure",
+                        target=url,
+                        reason="Reachable API-like endpoint returned user or account-shaped data without authentication.",
+                        source_finding_ids=[],
+                        recommended_safe_actions=[
+                            "Confirm the data belongs to public test content before escalating.",
+                            "Avoid enumerating records or expanding object IDs.",
+                            "Preserve only the smallest redacted response sample needed for review.",
+                        ],
+                        requires_manual_approval=True,
+                        reportable_now=False,
+                        notes=f"Auth behavior: {auth_behavior} | Signal: {auth_signal or 'unauthenticated_api_access'}",
+                    )
+                )
+                continue
+
+            if self._matches_any_pattern(lowered_url, self.SSRF_PARAM_PATTERNS):
+                candidates.append(
+                    TriageCandidate(
+                        candidate_id=self._make_id("endpoint-ssrf-candidate", url),
+                        priority="medium",
+                        category="ssrf_parameter_candidate",
+                        target=url,
+                        reason="Endpoint URL shape suggests a user-controlled redirect or fetch parameter.",
+                        source_finding_ids=[],
+                        recommended_safe_actions=[
+                            "Review parameter handling with low-risk manual inspection only.",
+                            "Do not send internal network targets unless policy and approval explicitly allow it.",
+                            "Capture redirect or error behavior, not exploit traffic.",
+                        ],
+                        requires_manual_approval=True,
+                        reportable_now=False,
+                        notes="Parameter name matched the SSRF-style review list.",
+                    )
+                )
+                continue
+
+            if accessible and self._matches_any_pattern(lowered_url, self.IDOR_PATTERNS):
+                candidates.append(
+                    TriageCandidate(
+                        candidate_id=self._make_id("endpoint-idor-candidate", url),
+                        priority="medium",
+                        category="idor_candidate",
+                        target=url,
+                        reason="Reachable endpoint URL contains an object identifier pattern worth later access-control review.",
+                        source_finding_ids=[],
+                        recommended_safe_actions=[
+                            "Use only self-owned or lab objects for any later authorization comparison.",
+                            "Do not iterate identifiers on real programs without explicit approval.",
+                            "Treat this as a lead, not proof.",
+                        ],
+                        requires_manual_approval=True,
+                        reportable_now=False,
+                        notes=f"Auth behavior: {auth_behavior}",
                     )
                 )
                 continue
@@ -693,6 +822,7 @@ class TriageEngine:
             discovered_paths = asset.get("discovered_paths", [])
             source_maps = asset.get("source_maps", [])
             keywords = asset.get("interesting_keywords", [])
+            pattern_findings = asset.get("pattern_findings", [])
 
             if risk_score >= 8:
                 priority = "high"
@@ -763,6 +893,51 @@ class TriageEngine:
                         requires_manual_approval=False,
                         reportable_now=False,
                         notes=f"Source map reference found in: {asset_url}",
+                    )
+                )
+
+            for finding in pattern_findings:
+                pattern_type = str(finding.get("pattern_type", "unknown"))
+                matched_value = str(finding.get("matched_value", "")).strip()
+                confidence = finding.get("confidence")
+                if not matched_value:
+                    continue
+
+                category = f"js_{pattern_type}"
+                priority = "medium"
+                requires_manual_approval = pattern_type in {
+                    "idor_candidate",
+                    "auth_surface_candidate",
+                    "ssrf_param_candidate",
+                }
+                reason = "Structured JavaScript analysis highlighted a potentially valuable route or keyword."
+
+                if pattern_type == "idor_candidate":
+                    priority = "high"
+                    reason = "JavaScript references an object-ID-shaped API route that may be useful for later access-control review."
+                elif pattern_type == "auth_surface_candidate":
+                    priority = "high"
+                    reason = "JavaScript references an admin, auth, or internal-looking route."
+                elif pattern_type == "ssrf_param_candidate":
+                    priority = "medium"
+                    reason = "JavaScript references a redirect or URL-like parameter worth manual review."
+
+                candidates.append(
+                    TriageCandidate(
+                        candidate_id=self._make_id("js-pattern", asset_url, pattern_type, matched_value),
+                        priority=priority,
+                        category=category,
+                        target=matched_value,
+                        reason=reason,
+                        source_finding_ids=[],
+                        recommended_safe_actions=[
+                            "Confirm the route or parameter exists with a safe request before going further.",
+                            "Keep testing read-only and aligned with the active profile policy.",
+                            "Treat pattern matches as leads that still need context and validation.",
+                        ],
+                        requires_manual_approval=requires_manual_approval,
+                        reportable_now=False,
+                        notes=f"Source asset: {asset_url} | Confidence: {confidence}",
                     )
                 )
 
@@ -1015,6 +1190,9 @@ class TriageEngine:
 
     def _contains_any(self, value: str, keywords: list[str]) -> bool:
         return any(keyword in value for keyword in keywords)
+
+    def _matches_any_pattern(self, value: str, patterns: list[str]) -> bool:
+        return any(re.search(pattern, value, flags=re.IGNORECASE) for pattern in patterns)
 
     def _priority_score(self, priority: str) -> int:
         scores = {
