@@ -10,6 +10,7 @@ import os
 from core.http_client import SafeHttpClient
 from core.run_context import RunContext
 from core.scope import ScopeManager, SessionProfileConfig
+from core.env_loader import DEFAULT_ENV_PATH
 
 
 STATIC_TOKEN_KINDS = {
@@ -227,7 +228,7 @@ class AuthenticatedSessionManager:
             env_hint = profile.token_env or "unset-token-env"
             raise ValueError(
                 f"Session profile `{profile.name}` requires token material. "
-                f"Set `{env_hint}` before using it."
+                f"Set `{env_hint}` in `{DEFAULT_ENV_PATH}` before using it."
             )
 
         return token

@@ -41,6 +41,11 @@ class PolicyConfig:
     requires_manual_approval_for: list[str]
     disallowed_actions: list[str]
     notes: list[str]
+    priority_categories: list[str]
+    deprioritized_categories: list[str]
+    core_ineligible_findings: list[str]
+    focus_areas: list[dict]
+    operator_recipes: list[dict]
 
 
 @dataclass(frozen=True)
@@ -249,6 +254,21 @@ class ScopeManager:
                     str(item) for item in policy.get("disallowed_actions", [])
                 ],
                 notes=[str(item) for item in policy.get("notes", [])],
+                priority_categories=[
+                    str(item) for item in policy.get("priority_categories", [])
+                ],
+                deprioritized_categories=[
+                    str(item) for item in policy.get("deprioritized_categories", [])
+                ],
+                core_ineligible_findings=[
+                    str(item) for item in policy.get("core_ineligible_findings", [])
+                ],
+                focus_areas=[
+                    item for item in policy.get("focus_areas", []) if isinstance(item, dict)
+                ],
+                operator_recipes=[
+                    item for item in policy.get("operator_recipes", []) if isinstance(item, dict)
+                ],
             ),
             session_profiles=self._build_session_profiles(
                 profile.get("session_profiles", {})
@@ -473,6 +493,11 @@ class ScopeManager:
             "requires_manual_approval_for": self.config.policy.requires_manual_approval_for,
             "disallowed_actions": self.config.policy.disallowed_actions,
             "notes": self.config.policy.notes,
+            "priority_categories": self.config.policy.priority_categories,
+            "deprioritized_categories": self.config.policy.deprioritized_categories,
+            "core_ineligible_findings": self.config.policy.core_ineligible_findings,
+            "focus_areas": self.config.policy.focus_areas,
+            "operator_recipes": self.config.policy.operator_recipes,
             "session_profiles": self.list_session_profiles(),
             "allow_port_scan": self.config.rules.allow_port_scan,
         }

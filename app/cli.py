@@ -14,7 +14,9 @@ from core.console import ConsoleSpinner, print_banner, print_status
 from core.lab_manager import LabManager
 from core.policy_fetcher import PolicyFetcher
 from core.policy_parser import PolicyParser
+from core.passive_surface_diff import PassiveSurfaceDiffRunner
 from core.preflight import PreflightChecker
+from core.program_lens import ProgramLensBuilder
 from core.profile_readiness import ProfileReadinessAssessor
 from core.program_onboarding import ProgramOnboardingBuilder
 from core.scope import ScopeManager
@@ -30,6 +32,7 @@ from core.ranking import CandidateRanker
 from core.review_queue import ReviewQueueBuilder
 from core.evidence_pack import EvidencePackBuilder
 from core.final_report import FinalReportComposer
+from core.high_value_recon import HighValueReconRunner
 from core.report_generator import ReportGenerator
 from core.session_surface_compare import SessionSurfaceCompareRunner
 from core.session_compare import SessionCompareRunner
@@ -156,6 +159,7 @@ def write_scope_artifacts(ctx: RunContext, scope: ScopeManager, scope_result: di
     )
     ctx.write_json("parsed/scope_check.json", scope_result)
     ctx.write_json("parsed/policy_snapshot.json", scope.policy_snapshot())
+    ProgramLensBuilder(scope=scope, run_context=ctx).build()
 
 
 def build_dashboard_safely(run_dir: str | Path) -> str | None:
@@ -237,6 +241,7 @@ def command_doctor(_: argparse.Namespace) -> int:
         PROJECT_ROOT / "core" / "review_queue.py",
         PROJECT_ROOT / "core" / "evidence_pack.py",
         PROJECT_ROOT / "core" / "final_report.py",
+        PROJECT_ROOT / "core" / "high_value_recon.py",
         PROJECT_ROOT / "core" / "report_generator.py",
         PROJECT_ROOT / "core" / "artifact_index.py",
         PROJECT_ROOT / "core" / "session_signals.py",
@@ -250,6 +255,8 @@ def command_doctor(_: argparse.Namespace) -> int:
         PROJECT_ROOT / "core" / "lab_manager.py",
         PROJECT_ROOT / "core" / "policy_fetcher.py",
         PROJECT_ROOT / "core" / "policy_parser.py",
+        PROJECT_ROOT / "core" / "passive_surface_diff.py",
+        PROJECT_ROOT / "core" / "program_lens.py",
         PROJECT_ROOT / "core" / "preflight.py",
         PROJECT_ROOT / "core" / "profile_readiness.py",
         PROJECT_ROOT / "core" / "program_onboarding.py",
@@ -626,6 +633,12 @@ def command_config(args: argparse.Namespace) -> int:
     print(f"Allowed HTTP methods:  {config.policy.allowed_http_methods}")
     print(f"Manual approval for:   {config.policy.requires_manual_approval_for}")
     print(f"Disallowed actions:    {config.policy.disallowed_actions}")
+    if config.policy.priority_categories:
+        print(f"Priority categories:   {config.policy.priority_categories}")
+    if config.policy.deprioritized_categories:
+        print(f"Deprioritized cats:    {config.policy.deprioritized_categories}")
+    if config.policy.core_ineligible_findings:
+        print(f"Core ineligible refs:  {config.policy.core_ineligible_findings}")
     for note in config.policy.notes:
         print(f"- {note}")
 
@@ -840,6 +853,28 @@ def command_surface_recon(args: argparse.Namespace) -> int:
         "HTTP session surface comparison completed",
     )
 
+    high_value_summary = run_step(
+        "Running high-value passive probes",
+        lambda: HighValueReconRunner(scope=scope, run_context=ctx).run(normalized_targets),
+        "High-value passive probes completed",
+    )
+
+    endpoint_validator = EndpointValidator(scope=scope, run_context=ctx)
+    endpoint_summary = run_step(
+        "Validating harvested high-value routes",
+        lambda: endpoint_validator.validate_from_run(max_endpoints=args.max_endpoints),
+        "Harvested route validation completed",
+    )
+
+    passive_surface_summary = run_step(
+        "Comparing passive cache and header behavior",
+        lambda: PassiveSurfaceDiffRunner(scope=scope, run_context=ctx).run(
+            normalized_targets,
+            max_surfaces=args.max_passive_surfaces,
+        ),
+        "Passive cache and header diff completed",
+    )
+
     browser_summary = None
     if args.with_browser:
         if not scope.config.rules.allow_browser_crawl:
@@ -932,6 +967,14 @@ def command_surface_recon(args: argparse.Namespace) -> int:
     print_info(f"Program: {ctx.program_name}")
     print_info(f"Compared surfaces: {session_summary.compared_surface_count}")
     print_info(f"HTTP hypotheses: {session_summary.hypothesis_count}")
+    print_info(f"High-value probes: {high_value_summary.tested_count}")
+    print_info(f"Interesting high-value probes: {high_value_summary.interesting_count}")
+    print_info(f"Harvested high-value routes: {high_value_summary.extracted_route_count}")
+    print_info(f"Endpoint tested count: {endpoint_summary.tested_count}")
+    print_info(f"Endpoint accessible count: {endpoint_summary.accessible_count}")
+    print_info(f"Endpoint exposure signals: {endpoint_summary.exposure_likely_count}")
+    print_info(f"Passive diff surfaces: {passive_surface_summary.compared_surface_count}")
+    print_info(f"Passive diff hypotheses: {passive_surface_summary.hypothesis_count}")
     if browser_summary is not None:
         print_info(f"Browser hypotheses: {browser_summary.hypothesis_count}")
         print_info(f"Browser failed surfaces: {browser_summary.failed_surface_count}")
@@ -1760,11 +1803,28 @@ def command_session_compare_run(args: argparse.Namespace) -> int:
         ),
         "Session comparison completed",
     )
-    index_summary = run_step(
-        "Updating artifact dashboard",
-        lambda: ArtifactIndexBuilder(run_dir).build(),
-        "Artifact dashboard updated",
-    )
+    triage = TriageEngine(run_dir)
+    candidates = run_step("Refreshing triage candidates", triage.triage, "Triage candidates refreshed")
+
+    planner = ValidationPlanner(run_dir)
+    validation_summary = run_step("Refreshing validation plan", planner.build_plan, "Validation plan refreshed")
+
+    ranker = CandidateRanker(run_dir)
+    ranked_summary = run_step("Refreshing ranked candidates", ranker.rank, "Candidate ranking refreshed")
+
+    queue_builder = ReviewQueueBuilder(run_dir)
+    queue_summary = run_step("Refreshing review queue", queue_builder.build, "Review queue refreshed")
+
+    evidence_builder = EvidencePackBuilder(run_dir)
+    evidence_summary = run_step("Refreshing evidence pack", evidence_builder.build, "Evidence pack refreshed")
+
+    final_report_composer = FinalReportComposer(run_dir)
+    final_report_summary = run_step("Refreshing final report draft", final_report_composer.build, "Final report draft refreshed")
+
+    generator = ReportGenerator(run_dir)
+    report_path = run_step("Refreshing general report", generator.generate, "General report refreshed")
+
+    index_summary = run_step("Updating artifact dashboard", lambda: ArtifactIndexBuilder(run_dir).build(), "Artifact dashboard updated")
 
     if summary.compared_count == 0:
         print_fail("Session compare completed, but no endpoints were selected.")
@@ -1780,8 +1840,15 @@ def command_session_compare_run(args: argparse.Namespace) -> int:
     print_info(f"Changed endpoints: {summary.changed_count}")
     print_info(f"Accessible after auth: {summary.accessible_after_auth_count}")
     print_info(f"New sensitive indicators after auth: {summary.newly_sensitive_count}")
+    print_info(f"Refreshed triage candidates: {len(candidates)}")
+    print_info(f"Refreshed validation items: {validation_summary.total_items}")
+    print_info(f"Refreshed ranked candidates: {ranked_summary.total_ranked}")
+    print_info(f"Refreshed review queue start now: {queue_summary.start_now_count}")
+    print_info(f"Refreshed evidence pack items: {evidence_summary.total_items}")
+    print_info(f"Refreshed final report items: {final_report_summary.report_draft_items}")
     print_info(f"JSON: {summary.results_json_path}")
     print_info(f"Markdown: {summary.report_markdown_path}")
+    print_info(f"General report: {report_path}")
     print_info(f"Dashboard file: {index_summary.index_markdown_path}")
 
     return 0
@@ -2296,6 +2363,18 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=15000,
         help="Per-page browser timeout in milliseconds for the optional browser phase",
+    )
+    surface_recon_parser.add_argument(
+        "--max-endpoints",
+        type=int,
+        default=25,
+        help="Maximum harvested high-value routes to validate with safe GET requests",
+    )
+    surface_recon_parser.add_argument(
+        "--max-passive-surfaces",
+        type=int,
+        default=8,
+        help="Maximum selected surfaces to compare for passive cache and header behavior",
     )
     surface_recon_parser.add_argument("--max-start-now", type=int, default=10, help="Maximum Start Now queue items")
     surface_recon_parser.add_argument("--max-manual-review", type=int, default=20, help="Maximum Manual Review queue items")

@@ -141,7 +141,7 @@ class ReviewQueueBuilder:
         reason = str(candidate.get("reason", ""))
         safe_next_steps = candidate.get("safe_next_steps", [])
         evidence_refs = candidate.get("evidence_refs", [])
-        notes = str(candidate.get("notes", ""))
+        notes = self._truncate_text(str(candidate.get("notes", "")), max_length=360)
 
         return ReviewQueueItem(
             queue_id=f"RQ-{rank:03d}",
@@ -157,6 +157,12 @@ class ReviewQueueBuilder:
             evidence_refs=evidence_refs if isinstance(evidence_refs, list) else [],
             notes=notes,
         )
+
+    def _truncate_text(self, value: str, max_length: int = 360) -> str:
+        compact = " ".join(value.split())
+        if len(compact) <= max_length:
+            return compact
+        return compact[: max_length - 3].rstrip() + "..."
 
     def _build_markdown(self, summary: ReviewQueueSummary, policy_snapshot: dict) -> str:
         lines = []

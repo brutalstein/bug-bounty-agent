@@ -48,8 +48,11 @@ class ValidationPlanner:
     def build_plan(self) -> ValidationPlanSummary:
         run_data = self._read_json(self.run_dir / "run.json")
         endpoint_validation = self._read_json(self.parsed_dir / "endpoint_validation.json")
+        high_value_recon = self._read_json(self.parsed_dir / "high_value_recon.json")
         js_analysis = self._read_json(self.parsed_dir / "js_analysis.json")
         session_surface_compare = self._read_json(self.parsed_dir / "session_surface_compare.json")
+        session_compare = self._read_json(self.parsed_dir / "session_compare.json")
+        passive_surface_diff = self._read_json(self.parsed_dir / "passive_surface_diff.json")
         browser_surface_compare = self._read_json(self.parsed_dir / "browser_surface_compare.json")
         triage_candidates = self._read_json(self.parsed_dir / "triage_candidates.json")
 
@@ -60,11 +63,20 @@ class ValidationPlanner:
         if isinstance(endpoint_validation, dict):
             items.extend(self._items_from_endpoint_validation(endpoint_validation))
 
+        if isinstance(high_value_recon, dict):
+            items.extend(self._items_from_high_value_recon(high_value_recon))
+
         if isinstance(js_analysis, dict):
             items.extend(self._items_from_js_analysis(js_analysis))
 
         if isinstance(session_surface_compare, dict):
             items.extend(self._items_from_session_surface_compare(session_surface_compare))
+
+        if isinstance(session_compare, dict):
+            items.extend(self._items_from_session_compare(session_compare))
+
+        if isinstance(passive_surface_diff, dict):
+            items.extend(self._items_from_passive_surface_diff(passive_surface_diff))
 
         if isinstance(browser_surface_compare, dict):
             items.extend(self._items_from_browser_surface_compare(browser_surface_compare))
@@ -298,6 +310,129 @@ class ValidationPlanner:
 
         return items
 
+    def _items_from_high_value_recon(self, high_value_recon: dict) -> list[ValidationPlanItem]:
+        probe_items = high_value_recon.get("items", [])
+        items: list[ValidationPlanItem] = []
+
+        if not isinstance(probe_items, list):
+            return items
+
+        for item in probe_items:
+            if not isinstance(item, dict) or item.get("interesting") is not True:
+                continue
+
+            target = str(item.get("target", "unknown"))
+            probe_kind = str(item.get("probe_kind", "unknown"))
+            check_id = str(item.get("check_id", "unknown"))
+            matched_signals = item.get("matched_signals", [])
+            sensitive_indicators = item.get("sensitive_indicators", [])
+            exposure_likely = item.get("exposure_likely") is True
+            risk_hint = str(item.get("risk_hint", ""))
+            response_sample = str(item.get("response_sample", ""))
+            status_code = item.get("status_code")
+            extracted_routes = item.get("extracted_routes", [])
+
+            if probe_kind == "api_schema":
+                category = "public_api_schema_review"
+                priority = "high"
+                steps = [
+                    "Review the schema or documentation response with redacted evidence only.",
+                    "Identify whether it exposes privileged routes, internal models, or hidden operations.",
+                    "Do not submit schema exposure without a concrete security consequence.",
+                ]
+            elif probe_kind == "graphql":
+                category = "graphql_surface_review"
+                priority = "high"
+                steps = [
+                    "Check whether the response reveals schema or operation hints through safe read-only behavior.",
+                    "Correlate with public docs or JS route discovery before deeper testing.",
+                    "Do not attempt mutation abuse without explicit policy allowance.",
+                ]
+            elif probe_kind == "client_config":
+                category = "public_client_config_review"
+                priority = "high" if exposure_likely or sensitive_indicators else "medium"
+                steps = [
+                    "Review the redacted config sample for sensitive environment or service-integration details.",
+                    "Check whether the file exposes only harmless bootstrap data or more sensitive wiring.",
+                    "Do not over-claim impact until the data sensitivity is understood.",
+                ]
+            else:
+                category = "public_route_inventory_review"
+                priority = "medium"
+                steps = [
+                    "Review discovered route inventory for admin, auth, API, or debug surfaces.",
+                    "Use listed routes as later safe validation candidates.",
+                    "Do not report route inventory without a concrete weakness.",
+                ]
+
+            items.append(
+                ValidationPlanItem(
+                    item_id=self._make_id("high-value-recon", check_id, target),
+                    priority=priority,
+                    reportability="needs_manual_validation",
+                    category=category,
+                    target=target,
+                    source="high_value_recon",
+                    reason=risk_hint or f"Interesting {probe_kind} surface discovered.",
+                    safe_validation_steps=steps,
+                    manual_approval_required=exposure_likely,
+                    evidence_refs=self._high_value_recon_evidence_refs(
+                        check_id=check_id,
+                        status_code=status_code,
+                        matched_signals=matched_signals,
+                        sensitive_indicators=sensitive_indicators,
+                        extracted_routes=extracted_routes,
+                    ),
+                    notes=self._high_value_recon_note(
+                        risk_hint=risk_hint,
+                        matched_signals=matched_signals,
+                        extracted_routes=extracted_routes,
+                        sample=response_sample,
+                    ),
+                )
+            )
+
+        return items
+
+    def _high_value_recon_evidence_refs(
+        self,
+        check_id: str,
+        status_code: int | None,
+        matched_signals: list | object,
+        sensitive_indicators: list | object,
+        extracted_routes: list | object,
+    ) -> list[str]:
+        refs = [
+            f"check_id={check_id}",
+            f"status_code={status_code}",
+        ]
+
+        if isinstance(matched_signals, list):
+            refs.extend(str(signal) for signal in matched_signals)
+
+        if isinstance(sensitive_indicators, list) and sensitive_indicators:
+            refs.append(f"sensitive_indicators={sensitive_indicators}")
+
+        if isinstance(extracted_routes, list) and extracted_routes:
+            refs.append(f"harvested_route_count={len(extracted_routes)}")
+
+        return refs
+
+    def _high_value_recon_note(
+        self,
+        risk_hint: str,
+        matched_signals: list | object,
+        extracted_routes: list | object,
+        sample: str,
+    ) -> str:
+        route_count = len(extracted_routes) if isinstance(extracted_routes, list) else 0
+        compact_sample = sample.replace("\n", " ").strip()[:220]
+        return (
+            f"{risk_hint} Signals: {matched_signals}. "
+            f"Harvested routes: {route_count}. "
+            f"Sample: {compact_sample}"
+        ).strip()
+
     def _items_from_session_surface_compare(self, session_surface_compare: dict) -> list[ValidationPlanItem]:
         hypotheses = session_surface_compare.get("hypotheses", [])
         items: list[ValidationPlanItem] = []
@@ -366,6 +501,169 @@ class ValidationPlanner:
             )
 
         return items
+
+    def _items_from_session_compare(self, session_compare: dict) -> list[ValidationPlanItem]:
+        raw_items = session_compare.get("items", [])
+        items: list[ValidationPlanItem] = []
+
+        if not isinstance(raw_items, list):
+            return items
+
+        for item in raw_items:
+            if not isinstance(item, dict):
+                continue
+
+            category = self._session_compare_category(item)
+            if not category:
+                continue
+
+            compare_id = str(item.get("compare_id", "unknown"))
+            target = str(item.get("url", "unknown"))
+            review_signal = str(item.get("review_signal", "")).strip() or "Session-driven difference observed."
+            priority = "medium"
+
+            if category in {
+                "authenticated_access_boundary_review",
+                "authenticated_sensitive_response_review",
+                "authenticated_cache_policy_variance_review",
+            }:
+                priority = "high"
+
+            items.append(
+                ValidationPlanItem(
+                    item_id=self._make_id("session-compare", compare_id, target),
+                    priority=priority,
+                    reportability="needs_manual_validation",
+                    category=category,
+                    target=target,
+                    source="session_compare",
+                    reason=review_signal,
+                    safe_validation_steps=[
+                        "Re-run the same read-only request pair with the approved session profile and capture only minimal headers.",
+                        "Confirm whether the difference is expected for the authenticated role before inferring broken authorization or cache risk.",
+                        "Do not enumerate additional records or manipulate session state without explicit policy allowance.",
+                    ],
+                    manual_approval_required=True,
+                    evidence_refs=self._session_compare_refs(compare_id, item),
+                    notes=f"Session compare notes: {item.get('notes', [])}",
+                )
+            )
+
+        return items
+
+    def _items_from_passive_surface_diff(self, passive_surface_diff: dict) -> list[ValidationPlanItem]:
+        hypotheses = passive_surface_diff.get("hypotheses", [])
+        items: list[ValidationPlanItem] = []
+
+        if not isinstance(hypotheses, list):
+            return items
+
+        for item in hypotheses:
+            if not isinstance(item, dict):
+                continue
+
+            hypothesis_id = str(item.get("hypothesis_id", "unknown"))
+            category = str(item.get("category", "passive_surface_review"))
+            severity = str(item.get("severity", "medium")).lower()
+            title = str(item.get("title", "Passive surface review"))
+            rationale = str(item.get("rationale", ""))
+            affected_surfaces = item.get("affected_surfaces", [])
+            supporting_signals = item.get("supporting_signals", [])
+            safe_next_steps = item.get("safe_next_steps", [])
+
+            target = "unknown"
+            if isinstance(affected_surfaces, list) and affected_surfaces:
+                target = str(affected_surfaces[0])
+
+            priority_map = {
+                "high": "high",
+                "medium": "high",
+                "low": "medium",
+            }
+
+            items.append(
+                ValidationPlanItem(
+                    item_id=self._make_id("passive-surface-diff", hypothesis_id, target),
+                    priority=priority_map.get(severity, "medium"),
+                    reportability="needs_manual_validation",
+                    category=category,
+                    target=target,
+                    source="passive_surface_diff",
+                    reason=title,
+                    safe_validation_steps=(
+                        safe_next_steps
+                        if isinstance(safe_next_steps, list) and safe_next_steps
+                        else [
+                            "Keep the review read-only and gather only minimal header evidence.",
+                            "Correlate with stronger anonymous or authenticated boundary differences before drafting a report.",
+                        ]
+                    ),
+                    manual_approval_required=True,
+                    evidence_refs=self._passive_surface_diff_refs(
+                        hypothesis_id=hypothesis_id,
+                        severity=severity,
+                        supporting_signals=supporting_signals,
+                    ),
+                    notes=rationale,
+                )
+            )
+
+        return items
+
+    def _passive_surface_diff_refs(
+        self,
+        hypothesis_id: str,
+        severity: str,
+        supporting_signals: list | object,
+    ) -> list[str]:
+        refs = [
+            f"hypothesis_id={hypothesis_id}",
+            f"severity={severity}",
+        ]
+
+        if isinstance(supporting_signals, list):
+            refs.extend(str(signal) for signal in supporting_signals)
+
+        return refs
+
+    def _session_compare_refs(self, compare_id: str, item: dict) -> list[str]:
+        refs = [
+            f"compare_id={compare_id}",
+            f"unauth_status={item.get('unauth_status_code')}",
+            f"auth_status={item.get('auth_status_code')}",
+            f"cache_policy_changed={item.get('cache_policy_changed')}",
+            f"vary_changed={item.get('vary_changed')}",
+            f"auth_cookie_delta={int(item.get('auth_auth_cookie_count', 0)) - int(item.get('unauth_auth_cookie_count', 0))}",
+        ]
+
+        if item.get("sensitive_indicators_added"):
+            refs.append(f"sensitive_indicators_added={item.get('sensitive_indicators_added')}")
+
+        return refs
+
+    def _session_compare_category(self, item: dict) -> str:
+        if item.get("sensitive_indicators_added"):
+            return "authenticated_sensitive_response_review"
+
+        if item.get("accessibility_changed") is True or item.get("auth_requirement_changed") is True:
+            return "authenticated_access_boundary_review"
+
+        if item.get("cache_policy_changed") is True and (
+            int(item.get("unauth_auth_cookie_count", 0)) > 0
+            or int(item.get("auth_auth_cookie_count", 0)) > 0
+        ):
+            return "authenticated_cache_policy_variance_review"
+
+        if item.get("auth_cookie_changed") is True or item.get("set_cookie_changed") is True:
+            return "authenticated_cookie_bootstrap_review"
+
+        if item.get("vary_changed") is True or item.get("cross_host_redirect_changed") is True:
+            return "authenticated_session_header_variance_review"
+
+        if item.get("status_changed") is True:
+            return "authenticated_behavior_variance_review"
+
+        return ""
 
     def _session_surface_evidence_refs(
         self,
@@ -580,6 +878,10 @@ class ValidationPlanner:
             "browser_session_bootstrap_review": "browser_cookie_bootstrap_review",
             "browser_storage_policy_review": "browser_storage_session_review",
             "cross_surface_session_bootstrap_review": "cross_surface_cookie_scope_review",
+            "public_api_schema_review": "public_api_schema_review",
+            "graphql_surface_review": "graphql_surface_review",
+            "public_client_config_review": "public_client_config_review",
+            "public_route_inventory_review": "public_route_inventory_review",
             "anonymous_session_bootstrap_review": "anonymous_session_bootstrap_review",
             "cross_host_session_bootstrap_review": "cross_host_session_bootstrap_review",
             "cookie_attribute_policy_review": "cookie_attribute_policy_review",
@@ -599,6 +901,10 @@ class ValidationPlanner:
             "cookie_attribute_policy_review",
             "cookie_scope_variance_review",
             "cookie_samesite_variance_review",
+            "public_api_schema_review",
+            "graphql_surface_review",
+            "public_client_config_review",
+            "public_route_inventory_review",
         }:
             return []
 

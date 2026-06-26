@@ -12,6 +12,10 @@ from core.scope import ScopeManager
 
 
 AUTH_LIKE_PATTERN = re.compile(r"(sess|auth|token|jwt|sid|csrf|xsrf|remember|login)", re.IGNORECASE)
+AUTH_LIKE_STORAGE_PATTERN = re.compile(
+    r"(auth|token|jwt|session|csrf|xsrf|remember|login|account|user)",
+    re.IGNORECASE,
+)
 
 
 @dataclass
@@ -185,7 +189,7 @@ class BrowserSurfaceCompareRunner:
                             auth_storage_key_count=sum(
                                 1
                                 for key in [*local_storage_keys, *session_storage_keys]
-                                if AUTH_LIKE_PATTERN.search(str(key))
+                                if AUTH_LIKE_STORAGE_PATTERN.search(str(key))
                             ),
                             cookies=[item.to_dict() for item in cookies],
                             local_storage_keys=[str(item) for item in local_storage_keys],

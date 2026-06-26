@@ -87,6 +87,11 @@ class PolicyParser:
                 "requires_manual_approval_for": parsed_policy.requires_manual_approval_for,
                 "disallowed_actions": parsed_policy.disallowed_actions,
                 "notes": parsed_policy.notes,
+                "priority_categories": [],
+                "deprioritized_categories": [],
+                "core_ineligible_findings": [],
+                "focus_areas": [],
+                "operator_recipes": [],
             },
         }
 

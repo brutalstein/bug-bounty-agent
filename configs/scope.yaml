@@ -74,6 +74,11 @@ profiles:
         - "Never scan assets outside allowed_hosts and allowed_url_patterns."
         - "Later profiles can be added for PortSwigger labs and real bug bounty scopes."
         - "POST is allowed here only for explicit, manual-approval authenticated lab session bootstrap."
+      priority_categories: []
+      deprioritized_categories: []
+      core_ineligible_findings: []
+      focus_areas: []
+      operator_recipes: []
 
     session_profiles:
       juice-shop-customer:
@@ -168,6 +173,98 @@ profiles:
         - "The same scope page explicitly warns not to test production airtable.com and to use endpointUrl https://api-staging.airtable.com for API testing."
         - "This profile is still restricted to low-rate, read-only probing. Only explicitly listed hosts from the wildcard family are enabled here; no wildcard host enumeration, no active scan, and no port scan are enabled."
         - "Read-only browser evidence and browser-based public-surface comparison are allowed only with explicit manual approval."
+      priority_categories:
+        - "cross_host_session_bootstrap_review"
+        - "anonymous_session_bootstrap_review"
+        - "cross_surface_session_bootstrap_review"
+        - "browser_session_bootstrap_review"
+        - "browser_storage_policy_review"
+        - "authentication_flow_review"
+        - "validated_authentication_surface"
+        - "validated_api_surface"
+        - "public_api_schema_review"
+        - "graphql_surface_review"
+        - "auth_surface_cache_policy_review"
+        - "session_cache_key_review"
+        - "api_surface_cache_review"
+      deprioritized_categories:
+        - "cookie_attribute_policy_review"
+        - "session_cookie_policy_review"
+        - "public_route_inventory_review"
+        - "reachable_api_mapping"
+      core_ineligible_findings:
+        - "missing_cookie_flags_without_impact"
+        - "permissive_cors_without_impact"
+        - "open_redirect_without_additional_impact"
+        - "clickjacking_without_sensitive_action"
+        - "software_version_disclosure_only"
+        - "rate_limiting_without_clear_security_impact"
+      focus_areas:
+        - id: "anonymous-auth-boundary"
+          title: "Anonymous auth bootstrap and session boundary drift"
+          objective: "Prioritize public routes that set auth-like cookies, change browser storage, or behave differently across hosts before login."
+          categories:
+            - "cross_host_session_bootstrap_review"
+            - "anonymous_session_bootstrap_review"
+            - "browser_session_bootstrap_review"
+            - "browser_storage_policy_review"
+          path_keywords:
+            - "/login"
+            - "/account"
+            - "/session"
+            - "/auth"
+            - "/internal/"
+          commands:
+            - "python app/main.py surface-recon --profile {profile_name} {base_url} {base_url}/login {base_url}/developers/web/api/introduction"
+            - "python app/main.py browser-surface-compare --profile {profile_name} --manual-approval {base_url} {base_url}/login {base_url}/developers/web/api/introduction"
+          notes:
+            - "Treat missing Secure or HttpOnly flags alone as low value unless they support a stronger boundary issue."
+            - "Favor cross-host, cross-surface, and storage or cookie provenance differences over single-response hardening issues."
+        - id: "developer-and-api-surface"
+          title: "Developer, API, and internal discovery surfaces"
+          objective: "Harvest safe high-value routes from public developer assets and compare anonymous versus authenticated visibility later with self-owned test data."
+          categories:
+            - "validated_api_surface"
+            - "public_api_schema_review"
+            - "graphql_surface_review"
+            - "authentication_flow_review"
+          path_keywords:
+            - "/developers"
+            - "/api"
+            - "/graphql"
+            - "/openapi"
+            - "/swagger"
+            - "/internal/"
+          commands:
+            - "python app/main.py surface-recon --profile {profile_name} {base_url} {base_url}/login {base_url}/developers/web/api/introduction"
+            - "python app/main.py authenticated-crawl --profile {profile_name} --session-profile airtable-staging-api-key --manual-approval {base_url}"
+            - "python app/main.py session-compare --manual-approval --session-profile airtable-staging-api-key runs/<run-dir>"
+          notes:
+            - "Keep authenticated checks limited to your own staging account, your own token, and self-owned test data."
+            - "Public route inventory alone is not a bounty; use it to drive endpoint validation and later auth-diff analysis."
+      operator_recipes:
+        - id: "airtable-passive-first-pass"
+          name: "Passive first pass"
+          goal: "Build the first high-signal anonymous surface map."
+          when: "New staging route set or after profile or routing changes."
+          command: "python app/main.py surface-recon --profile {profile_name} {base_url} {base_url}/login {base_url}/developers/web/api/introduction"
+          notes:
+            - "Review program_lens.md, high_value_route_candidates.md, review_queue.md, and evidence_pack.md together."
+        - id: "airtable-browser-boundary-check"
+          name: "Browser boundary check"
+          goal: "Compare read-only cookie and storage behavior on key public surfaces."
+          when: "When HTTP-only passive recon shows auth-like cookies or cross-host redirects."
+          command: "python app/main.py browser-surface-compare --profile {profile_name} --manual-approval {base_url} {base_url}/login {base_url}/developers/web/api/introduction"
+          notes:
+            - "Stay read-only and do not tamper with cookies or tokens."
+        - id: "airtable-owned-account-diff"
+          name: "Owned-account auth diff"
+          goal: "Compare anonymous and authenticated visibility with self-owned staging credentials."
+          when: "Only after strong anonymous signals and explicit manual approval."
+          command: "python app/main.py authenticated-crawl --profile {profile_name} --session-profile airtable-staging-api-key --manual-approval {base_url}"
+          notes:
+            - "Use endpointUrl https://api-staging.airtable.com for later API-focused work."
+            - "Avoid touching production data or any state-changing workflows."
 
     session_profiles:
       airtable-staging-api-key:

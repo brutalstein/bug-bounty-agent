@@ -56,6 +56,7 @@ class CandidateRanker:
     def rank(self) -> RankedCandidateSummary:
         run_data = self._read_json(self.run_dir / "run.json")
         validation_plan = self._read_json(self.parsed_dir / "validation_plan.json")
+        self.policy_snapshot = self._read_json(self.parsed_dir / "policy_snapshot.json")
 
         target = run_data.get("target_url", "unknown") if isinstance(run_data, dict) else "unknown"
         items = validation_plan.get("items", []) if isinstance(validation_plan, dict) else []
@@ -200,6 +201,12 @@ class CandidateRanker:
         if source == "session_surface_compare":
             score += 9
 
+        if source == "session_compare":
+            score += 10
+
+        if source == "high_value_recon":
+            score += 10
+
         if source == "js_analysis":
             score -= 4
 
@@ -212,14 +219,37 @@ class CandidateRanker:
         if "auth_cookie_count=" in evidence_blob:
             score += 6
 
+        if "auth_cookie_delta=" in evidence_blob:
+            score += 6
+
         if "cross_host_redirect_count=" in evidence_blob:
             score += 8
+
+        if "cache_policy_changed=true" in evidence_blob:
+            score += 7
+
+        if "vary_changed=true" in evidence_blob:
+            score += 5
 
         if "domains=" in evidence_blob:
             score += 4
 
         if "samesite=" in evidence_blob:
             score += 3
+
+        if "openapi_marker" in evidence_blob or "swagger_marker" in evidence_blob:
+            score += 10
+
+        if "graphql_marker" in evidence_blob or "graphiql_marker" in evidence_blob:
+            score += 9
+
+        if "config_key=" in evidence_blob:
+            score += 6
+
+        if "route_marker=/admin" in evidence_blob or "route_marker=/debug" in evidence_blob:
+            score += 7
+
+        score += self._priority_category_bonus(item)
 
         return max(0, score)
 
@@ -270,7 +300,25 @@ class CandidateRanker:
         if "authentication" in category:
             score += 10
 
+        if "authenticated_access_boundary" in category:
+            score += 14
+
+        if "authenticated_sensitive_response" in category:
+            score += 16
+
+        if "authenticated_cache_policy" in category:
+            score += 10
+
+        if "authenticated_cookie_bootstrap" in category:
+            score += 6
+
+        if "authenticated_session_header" in category:
+            score += 5
+
         if "cross_host" in category:
+            score += 8
+
+        if "cache" in category:
             score += 8
 
         if "cookie_attribute" in category:
@@ -279,8 +327,22 @@ class CandidateRanker:
         if "cookie_scope" in category or "samesite" in category:
             score += 4
 
+        if "graphql" in category:
+            score += 9
+
+        if "api_schema" in category:
+            score += 8
+
+        if "client_config" in category:
+            score += 7
+
+        if "route_inventory" in category:
+            score += 4
+
         if "reachable_api_mapping" in category:
             score += 3
+
+        score += self._priority_path_bonus(item)
 
         return min(score, 35)
 
@@ -316,6 +378,8 @@ class CandidateRanker:
 
         if "{{href}}" in target or "%7b%7bhref%7d%7d" in target:
             score += 25
+
+        score += self._program_lens_noise(item)
 
         return min(score, 60)
 
@@ -369,7 +433,94 @@ class CandidateRanker:
         if item.get("manual_approval_required") is True:
             reasons.append("Manual approval required before deeper validation.")
 
+        category = str(item.get("category", "")).lower()
+        if category in self._priority_categories():
+            reasons.append("Program lens marked this category as a focus area.")
+        if category in self._deprioritized_categories():
+            reasons.append("Program lens deprioritized this category as lower expected value.")
+        if self._is_core_ineligible_pattern(item):
+            reasons.append("Program lens matched a core-ineligible style pattern; score was reduced.")
+
         return reasons
+
+    def _priority_categories(self) -> set[str]:
+        snapshot = self.policy_snapshot if isinstance(getattr(self, "policy_snapshot", {}), dict) else {}
+        return {
+            str(item).strip().lower()
+            for item in snapshot.get("priority_categories", [])
+        }
+
+    def _deprioritized_categories(self) -> set[str]:
+        snapshot = self.policy_snapshot if isinstance(getattr(self, "policy_snapshot", {}), dict) else {}
+        return {
+            str(item).strip().lower()
+            for item in snapshot.get("deprioritized_categories", [])
+        }
+
+    def _focus_path_keywords(self) -> set[str]:
+        snapshot = self.policy_snapshot if isinstance(getattr(self, "policy_snapshot", {}), dict) else {}
+        keywords: set[str] = set()
+
+        for area in snapshot.get("focus_areas", []):
+            if not isinstance(area, dict):
+                continue
+            for item in area.get("path_keywords", []):
+                keywords.add(str(item).strip().lower())
+
+        return keywords
+
+    def _core_ineligible_findings(self) -> set[str]:
+        snapshot = self.policy_snapshot if isinstance(getattr(self, "policy_snapshot", {}), dict) else {}
+        return {
+            str(item).strip().lower()
+            for item in snapshot.get("core_ineligible_findings", [])
+        }
+
+    def _priority_category_bonus(self, item: dict) -> int:
+        category = str(item.get("category", "")).lower()
+        return 10 if category in self._priority_categories() else 0
+
+    def _priority_path_bonus(self, item: dict) -> int:
+        target = str(item.get("target", "")).lower()
+
+        for keyword in self._focus_path_keywords():
+            if keyword and keyword in target:
+                return 4
+
+        return 0
+
+    def _program_lens_noise(self, item: dict) -> int:
+        category = str(item.get("category", "")).lower()
+        penalty = 0
+
+        if category in self._deprioritized_categories():
+            penalty += 18
+
+        if self._is_core_ineligible_pattern(item):
+            penalty += 20
+
+        return penalty
+
+    def _is_core_ineligible_pattern(self, item: dict) -> bool:
+        category = str(item.get("category", "")).lower()
+        ineligible = self._core_ineligible_findings()
+
+        if (
+            "missing_cookie_flags_without_impact" in ineligible
+            and category in {"cookie_attribute_policy_review", "session_cookie_policy_review"}
+        ):
+            return True
+
+        if "permissive_cors_without_impact" in ineligible and "cors" in category:
+            return True
+
+        if "open_redirect_without_additional_impact" in ineligible and "redirect" in category:
+            return True
+
+        if "clickjacking_without_sensitive_action" in ineligible and "clickjacking" in category:
+            return True
+
+        return False
 
     def _read_json(self, path: Path) -> dict | list:
         if not path.exists():

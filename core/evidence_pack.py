@@ -72,19 +72,23 @@ class EvidencePackBuilder:
         run_data = self._read_json(self.run_dir / "run.json")
         review_queue = self._read_json(self.parsed_dir / "review_queue.json")
         endpoint_validation = self._read_json(self.parsed_dir / "endpoint_validation.json")
+        high_value_recon = self._read_json(self.parsed_dir / "high_value_recon.json")
         policy_snapshot = self._read_json(self.parsed_dir / "policy_snapshot.json")
         browser_evidence = self._read_json(self.parsed_dir / "browser_evidence.json")
         browser_surface_compare = self._read_json(self.parsed_dir / "browser_surface_compare.json")
         session_surface_compare = self._read_json(self.parsed_dir / "session_surface_compare.json")
+        passive_surface_diff = self._read_json(self.parsed_dir / "passive_surface_diff.json")
         session_compare = self._read_json(self.parsed_dir / "session_compare.json")
 
         target = run_data.get("target_url", "unknown") if isinstance(run_data, dict) else "unknown"
 
         endpoint_index = self._build_endpoint_index(endpoint_validation)
+        high_value_index = self._build_high_value_index(high_value_recon)
         screenshot_index = self._build_screenshot_index(browser_evidence)
         passive_signal_index = self._build_passive_signal_index(
             browser_surface_compare=browser_surface_compare,
             session_surface_compare=session_surface_compare,
+            passive_surface_diff=passive_surface_diff,
         )
         session_compare_index = self._build_session_compare_index(session_compare)
 
@@ -103,6 +107,7 @@ class EvidencePackBuilder:
             self._build_item(
                 queue_item=item,
                 endpoint_index=endpoint_index,
+                high_value_index=high_value_index,
                 screenshot_index=screenshot_index,
                 passive_signal_index=passive_signal_index,
                 session_compare_index=session_compare_index,
@@ -137,12 +142,14 @@ class EvidencePackBuilder:
         self,
         queue_item: dict,
         endpoint_index: dict[str, dict],
+        high_value_index: dict[str, dict],
         screenshot_index: dict[str, list[str]],
         passive_signal_index: dict[str, list[str]],
         session_compare_index: dict[str, list[str]],
     ) -> EvidencePackItem:
         target = str(queue_item.get("target", "unknown"))
         endpoint = endpoint_index.get(target, {})
+        high_value = high_value_index.get(target, {})
         screenshot_refs = screenshot_index.get(target, [])
         passive_signal_summary = passive_signal_index.get(target, [])
         session_compare_refs = session_compare_index.get(target, [])
@@ -163,16 +170,16 @@ class EvidencePackBuilder:
             reportability=str(queue_item.get("reportability", "unknown")),
             final_score=int(queue_item.get("final_score", 0)),
             manual_approval_required=queue_item.get("manual_approval_required") is True,
-            status_code=endpoint.get("status_code"),
-            content_type=endpoint.get("content_type"),
+            status_code=endpoint.get("status_code", high_value.get("status_code")),
+            content_type=endpoint.get("content_type", high_value.get("content_type")),
             accessible=endpoint.get("accessible"),
             auth_likely_required=endpoint.get("auth_likely_required"),
-            exposure_likely=endpoint.get("exposure_likely"),
-            sensitive_indicators=endpoint.get("sensitive_indicators", []),
+            exposure_likely=endpoint.get("exposure_likely", high_value.get("exposure_likely")),
+            sensitive_indicators=endpoint.get("sensitive_indicators", high_value.get("sensitive_indicators", [])),
             reason=str(queue_item.get("reason", "")),
-            risk_hint=str(endpoint.get("risk_hint", "")),
-            redacted_response_sample=str(endpoint.get("response_sample", "")),
-            passive_signal_summary=passive_signal_summary,
+            risk_hint=str(endpoint.get("risk_hint") or high_value.get("risk_hint", "")),
+            redacted_response_sample=str(endpoint.get("response_sample") or high_value.get("response_sample", "")),
+            passive_signal_summary=passive_signal_summary + high_value.get("passive_signal_summary", []),
             safe_next_steps=queue_item.get("safe_next_steps", []),
             evidence_refs=merged_refs,
             notes=str(queue_item.get("notes", "")),
@@ -222,7 +229,58 @@ class EvidencePackBuilder:
             if review_signal:
                 note = f"{note}::{review_signal[:120]}"
 
-            index.setdefault(target, []).append(note)
+            refs = [
+                note,
+                f"session_compare.cache_policy_changed={item.get('cache_policy_changed')}",
+                f"session_compare.vary_changed={item.get('vary_changed')}",
+                f"session_compare.auth_cookie_delta={int(item.get('auth_auth_cookie_count', 0)) - int(item.get('unauth_auth_cookie_count', 0))}",
+                f"session_compare.auth_cache_control={item.get('auth_cache_control', '')}",
+                f"session_compare.auth_vary={item.get('auth_vary', '')}",
+            ]
+            index.setdefault(target, []).extend(refs)
+
+        return index
+
+    def _build_high_value_index(self, high_value_recon: dict | list) -> dict[str, dict]:
+        if not isinstance(high_value_recon, dict):
+            return {}
+
+        items = high_value_recon.get("items", [])
+        if not isinstance(items, list):
+            return {}
+
+        index: dict[str, dict] = {}
+
+        for item in items:
+            if not isinstance(item, dict) or item.get("interesting") is not True:
+                continue
+
+            target = str(item.get("target", "")).strip()
+            if not target:
+                continue
+
+            current = index.get(target)
+            candidate = {
+                "status_code": item.get("status_code"),
+                "content_type": item.get("content_type"),
+                "exposure_likely": item.get("exposure_likely"),
+                "sensitive_indicators": item.get("sensitive_indicators", []),
+                "risk_hint": item.get("risk_hint", ""),
+                "response_sample": item.get("response_sample", ""),
+                "passive_signal_summary": [
+                    f"high_value.kind={item.get('probe_kind', 'unknown')}",
+                    f"high_value.path={item.get('path', '')}",
+                    f"high_value.signals={item.get('matched_signals', [])}",
+                ],
+                "_score": (
+                    (30 if item.get("exposure_likely") else 0)
+                    + len(item.get("sensitive_indicators", [])) * 5
+                    + len(item.get("matched_signals", []))
+                ),
+            }
+
+            if current is None or candidate["_score"] > current["_score"]:
+                index[target] = candidate
 
         return index
 
@@ -230,6 +288,7 @@ class EvidencePackBuilder:
         self,
         browser_surface_compare: dict | list,
         session_surface_compare: dict | list,
+        passive_surface_diff: dict | list,
     ) -> dict[str, list[str]]:
         index: dict[str, list[str]] = {}
 
@@ -306,6 +365,44 @@ class EvidencePackBuilder:
                         continue
 
                     ref = f"session_hypothesis={hypothesis_id}:{title}"
+                    for target in affected:
+                        normalized = str(target).strip()
+                        if normalized:
+                            index.setdefault(normalized, []).append(ref)
+
+        if isinstance(passive_surface_diff, dict):
+            surfaces = passive_surface_diff.get("surfaces", [])
+            hypotheses = passive_surface_diff.get("hypotheses", [])
+
+            if isinstance(surfaces, list):
+                for item in surfaces:
+                    if not isinstance(item, dict):
+                        continue
+
+                    target = str(item.get("final_url") or item.get("requested_target") or "").strip()
+                    if not target:
+                        continue
+
+                    refs = [
+                        f"passive_diff.path_kind={item.get('path_kind', 'unknown')}",
+                        f"passive_diff.cache_control={item.get('cache_control', '')}",
+                        f"passive_diff.vary={item.get('vary', '')}",
+                        f"passive_diff.auth_cookies={item.get('auth_cookie_count', 0)}",
+                    ]
+                    index.setdefault(target, []).extend(refs)
+
+            if isinstance(hypotheses, list):
+                for item in hypotheses:
+                    if not isinstance(item, dict):
+                        continue
+
+                    affected = item.get("affected_surfaces", [])
+                    hypothesis_id = str(item.get("hypothesis_id", "")).strip()
+                    title = str(item.get("title", "")).strip()
+                    if not hypothesis_id or not isinstance(affected, list):
+                        continue
+
+                    ref = f"passive_diff_hypothesis={hypothesis_id}:{title}"
                     for target in affected:
                         normalized = str(target).strip()
                         if normalized:

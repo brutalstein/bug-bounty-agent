@@ -33,8 +33,12 @@ class ArtifactIndexBuilder:
         scope_data = self._read_json(self.parsed_dir / "scope_check.json")
         policy_data = self._read_json(self.parsed_dir / "policy_snapshot.json")
         preflight_data = self._read_json(self.parsed_dir / "preflight_check.json")
+        high_value_recon = self._read_json(self.parsed_dir / "high_value_recon.json")
+        high_value_routes = self._read_json(self.parsed_dir / "high_value_route_candidates.json")
+        program_lens = self._read_json(self.parsed_dir / "program_lens.json")
         session_signals = self._read_json(self.parsed_dir / "session_signals.json")
         session_surface_compare = self._read_json(self.parsed_dir / "session_surface_compare.json")
+        passive_surface_diff = self._read_json(self.parsed_dir / "passive_surface_diff.json")
         browser_surface_compare = self._read_json(self.parsed_dir / "browser_surface_compare.json")
         auth_session = self._read_json(self.parsed_dir / "auth_session.json")
         authenticated_crawl = self._read_json(self.parsed_dir / "authenticated_crawl_summary.json")
@@ -53,8 +57,12 @@ class ArtifactIndexBuilder:
             path.name
             for path in [
                 self.reports_dir / "nmap_scan.md",
+                self.reports_dir / "high_value_recon.md",
+                self.reports_dir / "high_value_route_candidates.md",
+                self.reports_dir / "program_lens.md",
                 self.reports_dir / "session_signals.md",
                 self.reports_dir / "session_surface_compare.md",
+                self.reports_dir / "passive_surface_diff.md",
                 self.reports_dir / "browser_surface_compare.md",
                 self.reports_dir / "review_queue.md",
                 self.reports_dir / "browser_evidence.md",
@@ -76,8 +84,12 @@ class ArtifactIndexBuilder:
                 self.parsed_dir / "nmap_scan.json",
                 self.parsed_dir / "nmap_scan.xml",
                 self.parsed_dir / "preflight_check.json",
+                self.parsed_dir / "high_value_recon.json",
+                self.parsed_dir / "high_value_route_candidates.json",
+                self.parsed_dir / "program_lens.json",
                 self.parsed_dir / "session_signals.json",
                 self.parsed_dir / "session_surface_compare.json",
+                self.parsed_dir / "passive_surface_diff.json",
                 self.parsed_dir / "browser_surface_compare.json",
                 self.parsed_dir / "auth_session.json",
                 self.parsed_dir / "authenticated_crawl_result.json",
@@ -111,8 +123,12 @@ class ArtifactIndexBuilder:
             scope_data=scope_data,
             policy_data=policy_data,
             preflight_data=preflight_data,
+            high_value_recon=high_value_recon,
+            high_value_routes=high_value_routes,
+            program_lens=program_lens,
             session_signals=session_signals,
             session_surface_compare=session_surface_compare,
+            passive_surface_diff=passive_surface_diff,
             browser_surface_compare=browser_surface_compare,
             auth_session=auth_session,
             authenticated_crawl=authenticated_crawl,
@@ -133,8 +149,12 @@ class ArtifactIndexBuilder:
         scope_data: dict,
         policy_data: dict,
         preflight_data: dict,
+        high_value_recon: dict,
+        high_value_routes: dict,
+        program_lens: dict,
         session_signals: dict,
         session_surface_compare: dict,
+        passive_surface_diff: dict,
         browser_surface_compare: dict,
         auth_session: dict,
         authenticated_crawl: dict,
@@ -175,11 +195,21 @@ class ArtifactIndexBuilder:
             lines.append(f"- **Preflight Probe Success:** `{preflight_data.get('probe_success', 'unknown')}`")
             lines.append(f"- **Preflight Status Code:** `{preflight_data.get('status_code', 'unknown')}`")
             lines.append(f"- **Preflight Blocking Issues:** `{preflight_data.get('blocking_issues', [])}`")
+        if high_value_recon:
+            lines.append(f"- **High-Value Interesting Probes:** `{high_value_recon.get('interesting_count', 0)}`")
+            lines.append(f"- **High-Value Exposure-Likely Probes:** `{high_value_recon.get('exposure_likely_count', 0)}`")
+            lines.append(f"- **High-Value Harvested Routes:** `{high_value_recon.get('extracted_route_count', 0)}`")
+        if program_lens:
+            lines.append(f"- **Priority Categories:** `{len(program_lens.get('priority_categories', []))}`")
+            lines.append(f"- **Deprioritized Categories:** `{len(program_lens.get('deprioritized_categories', []))}`")
+            lines.append(f"- **Focus Areas:** `{len(program_lens.get('focus_areas', []))}`")
         if session_signals:
             lines.append(f"- **Session Signal Issues:** `{session_signals.get('issue_count', 0)}`")
             lines.append(f"- **Set-Cookie Headers:** `{session_signals.get('set_cookie_count', 0)}`")
         if session_surface_compare:
             lines.append(f"- **Session Surface Hypotheses:** `{session_surface_compare.get('hypothesis_count', 0)}`")
+        if passive_surface_diff:
+            lines.append(f"- **Passive Header Diff Hypotheses:** `{passive_surface_diff.get('hypothesis_count', 0)}`")
         if browser_surface_compare:
             lines.append(f"- **Browser Surface Hypotheses:** `{browser_surface_compare.get('hypothesis_count', 0)}`")
             lines.append(f"- **Browser Surface Failures:** `{browser_surface_compare.get('failed_surface_count', 0)}`")
@@ -191,6 +221,10 @@ class ArtifactIndexBuilder:
         lines.append("")
         lines.append(f"- **Review Queue Start Now:** `{review_queue.get('start_now_count', 0)}`")
         lines.append(f"- **Review Queue Manual Review:** `{review_queue.get('manual_review_count', 0)}`")
+        lines.append(f"- **High-Value Probes Tested:** `{high_value_recon.get('tested_count', 0)}`")
+        lines.append(f"- **High-Value Route Candidates:** `{high_value_routes.get('total_candidates', 0)}`")
+        lines.append(f"- **Program Lens Recipes:** `{len(program_lens.get('operator_recipes', []))}`")
+        lines.append(f"- **Passive Header Diff Targets:** `{passive_surface_diff.get('compared_surface_count', 0)}`")
         lines.append(f"- **Authenticated Crawl Only URLs:** `{authenticated_crawl.get('authenticated_only_count', 0)}`")
         lines.append(f"- **Session Compare Changed Endpoints:** `{session_compare.get('changed_count', 0)}`")
         lines.append(f"- **Session Compare Accessible After Auth:** `{session_compare.get('accessible_after_auth_count', 0)}`")
@@ -204,8 +238,12 @@ class ArtifactIndexBuilder:
         lines.append("## Report Artifacts")
         lines.append("")
         lines.append(f"- `reports/nmap_scan.md` {'(present)' if (self.reports_dir / 'nmap_scan.md').exists() else '(missing)' }")
+        lines.append(f"- `reports/high_value_recon.md` {'(present)' if (self.reports_dir / 'high_value_recon.md').exists() else '(missing)' }")
+        lines.append(f"- `reports/high_value_route_candidates.md` {'(present)' if (self.reports_dir / 'high_value_route_candidates.md').exists() else '(missing)' }")
+        lines.append(f"- `reports/program_lens.md` {'(present)' if (self.reports_dir / 'program_lens.md').exists() else '(missing)' }")
         lines.append(f"- `reports/session_signals.md` {'(present)' if (self.reports_dir / 'session_signals.md').exists() else '(missing)' }")
         lines.append(f"- `reports/session_surface_compare.md` {'(present)' if (self.reports_dir / 'session_surface_compare.md').exists() else '(missing)' }")
+        lines.append(f"- `reports/passive_surface_diff.md` {'(present)' if (self.reports_dir / 'passive_surface_diff.md').exists() else '(missing)' }")
         lines.append(f"- `reports/browser_surface_compare.md` {'(present)' if (self.reports_dir / 'browser_surface_compare.md').exists() else '(missing)' }")
         lines.append(f"- `reports/review_queue.md` {'(present)' if (self.reports_dir / 'review_queue.md').exists() else '(missing)' }")
         lines.append(f"- `reports/browser_evidence.md` {'(present)' if (self.reports_dir / 'browser_evidence.md').exists() else '(missing)' }")

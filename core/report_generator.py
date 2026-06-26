@@ -23,8 +23,11 @@ class ReportGenerator:
         triage_candidates = self._read_json(self.parsed_dir / "triage_candidates.json")
         js_analysis = self._read_json(self.parsed_dir / "js_analysis.json")
         nmap_scan = self._read_json(self.parsed_dir / "nmap_scan.json")
+        high_value_recon = self._read_json(self.parsed_dir / "high_value_recon.json")
         session_signals = self._read_json(self.parsed_dir / "session_signals.json")
         session_surface_compare = self._read_json(self.parsed_dir / "session_surface_compare.json")
+        session_compare = self._read_json(self.parsed_dir / "session_compare.json")
+        passive_surface_diff = self._read_json(self.parsed_dir / "passive_surface_diff.json")
         browser_surface_compare = self._read_json(self.parsed_dir / "browser_surface_compare.json")
         endpoint_validation = self._read_json(self.parsed_dir / "endpoint_validation.json")
         validation_plan = self._read_json(self.parsed_dir / "validation_plan.json")
@@ -45,11 +48,20 @@ class ReportGenerator:
         if not isinstance(nmap_scan, dict):
             nmap_scan = {}
 
+        if not isinstance(high_value_recon, dict):
+            high_value_recon = {}
+
         if not isinstance(session_signals, dict):
             session_signals = {}
 
         if not isinstance(session_surface_compare, dict):
             session_surface_compare = {}
+
+        if not isinstance(session_compare, dict):
+            session_compare = {}
+
+        if not isinstance(passive_surface_diff, dict):
+            passive_surface_diff = {}
 
         if not isinstance(browser_surface_compare, dict):
             browser_surface_compare = {}
@@ -68,8 +80,11 @@ class ReportGenerator:
             triage_candidates=triage_candidates,
             js_analysis=js_analysis,
             nmap_scan=nmap_scan,
+            high_value_recon=high_value_recon,
             session_signals=session_signals,
             session_surface_compare=session_surface_compare,
+            session_compare=session_compare,
+            passive_surface_diff=passive_surface_diff,
             browser_surface_compare=browser_surface_compare,
             endpoint_validation=endpoint_validation,
             validation_plan=validation_plan,
@@ -89,8 +104,11 @@ class ReportGenerator:
         triage_candidates: list[dict],
         js_analysis: dict,
         nmap_scan: dict,
+        high_value_recon: dict,
         session_signals: dict,
         session_surface_compare: dict,
+        session_compare: dict,
+        passive_surface_diff: dict,
         browser_surface_compare: dict,
         endpoint_validation: dict,
         validation_plan: dict,
@@ -253,6 +271,35 @@ class ReportGenerator:
             lines.append("No Nmap summary was generated for this run.")
 
         lines.append("")
+        lines.append("## High-Value Passive Recon")
+        lines.append("")
+
+        if high_value_recon:
+            lines.append(f"- **Tested Probes:** `{high_value_recon.get('tested_count', 0)}`")
+            lines.append(f"- **Interesting Probes:** `{high_value_recon.get('interesting_count', 0)}`")
+            lines.append(f"- **Exposure-Likely Probes:** `{high_value_recon.get('exposure_likely_count', 0)}`")
+            lines.append(f"- **Harvested Route Candidates:** `{high_value_recon.get('extracted_route_count', 0)}`")
+            lines.append("")
+            interesting_items = [
+                item
+                for item in high_value_recon.get("items", [])
+                if isinstance(item, dict) and item.get("interesting") is True
+            ]
+            if interesting_items:
+                for item in interesting_items[:10]:
+                    lines.append(
+                        f"- **{item.get('path', 'unknown')}:** "
+                        f"kind={item.get('probe_kind', 'unknown')}, "
+                        f"signals={item.get('matched_signals', [])}, "
+                        f"status={item.get('status_code', 'unknown')}, "
+                        f"routes={len(item.get('extracted_routes', []))}"
+                    )
+            else:
+                lines.append("- No interesting high-value probes.")
+        else:
+            lines.append("No high-value passive recon data was generated for this run.")
+
+        lines.append("")
         lines.append("## Session And Cookie Signals")
         lines.append("")
 
@@ -268,12 +315,20 @@ class ReportGenerator:
         lines.append("## Surface Comparison Signals")
         lines.append("")
 
-        if session_surface_compare or browser_surface_compare:
+        if session_surface_compare or session_compare or passive_surface_diff or browser_surface_compare:
             if session_surface_compare:
                 lines.append(f"- **HTTP Surface Compare Targets:** `{session_surface_compare.get('compared_surface_count', 0)}`")
                 lines.append(f"- **HTTP Surface Compare Hypotheses:** `{session_surface_compare.get('hypothesis_count', 0)}`")
                 lines.append(f"- **HTTP Surface Compare Issues:** `{session_surface_compare.get('total_issue_count', 0)}`")
                 lines.append(f"- **HTTP Surface Compare Auth-Like Cookies:** `{session_surface_compare.get('total_auth_cookie_count', 0)}`")
+            if session_compare:
+                lines.append(f"- **Authenticated Endpoint Compares:** `{session_compare.get('compared_count', 0)}`")
+                lines.append(f"- **Authenticated Endpoint Changes:** `{session_compare.get('changed_count', 0)}`")
+                lines.append(f"- **Accessible Only After Auth:** `{session_compare.get('accessible_after_auth_count', 0)}`")
+                lines.append(f"- **New Sensitive Indicators After Auth:** `{session_compare.get('newly_sensitive_count', 0)}`")
+            if passive_surface_diff:
+                lines.append(f"- **Passive Header Diff Targets:** `{passive_surface_diff.get('compared_surface_count', 0)}`")
+                lines.append(f"- **Passive Header Diff Hypotheses:** `{passive_surface_diff.get('hypothesis_count', 0)}`")
             if browser_surface_compare:
                 lines.append(f"- **Browser Surface Compare Targets:** `{browser_surface_compare.get('compared_surface_count', 0)}`")
                 lines.append(f"- **Browser Surface Compare Failures:** `{browser_surface_compare.get('failed_surface_count', 0)}`")
@@ -287,6 +342,8 @@ class ReportGenerator:
             passive_hypotheses: list[dict] = []
             if isinstance(session_surface_compare.get("hypotheses"), list):
                 passive_hypotheses.extend(session_surface_compare.get("hypotheses", [])[:3])
+            if isinstance(passive_surface_diff.get("hypotheses"), list):
+                passive_hypotheses.extend(passive_surface_diff.get("hypotheses", [])[:3])
             if isinstance(browser_surface_compare.get("hypotheses"), list):
                 passive_hypotheses.extend(browser_surface_compare.get("hypotheses", [])[:3])
 
@@ -295,6 +352,33 @@ class ReportGenerator:
                     lines.append(f"- **{item.get('hypothesis_id', 'unknown')}:** {item.get('title', 'Untitled hypothesis')}")
             else:
                 lines.append("- No passive hypotheses.")
+
+            changed_session_items = [
+                item
+                for item in session_compare.get("items", [])
+                if isinstance(item, dict)
+                and any(
+                    [
+                        item.get("status_changed") is True,
+                        item.get("accessibility_changed") is True,
+                        item.get("auth_requirement_changed") is True,
+                        item.get("cache_policy_changed") is True,
+                        item.get("vary_changed") is True,
+                        item.get("auth_cookie_changed") is True,
+                    ]
+                )
+            ]
+            lines.append("")
+            lines.append("### Top Authenticated Diffs")
+            lines.append("")
+            if changed_session_items:
+                for item in changed_session_items[:6]:
+                    lines.append(
+                        f"- **{item.get('compare_id', 'unknown')}:** {item.get('url', 'unknown')} "
+                        f"-> {item.get('review_signal', 'Behavioral difference observed.')}"
+                    )
+            else:
+                lines.append("- No authenticated endpoint diffs were recorded.")
         else:
             lines.append("No passive surface comparison data was generated.")
 

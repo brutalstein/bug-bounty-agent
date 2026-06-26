@@ -10,6 +10,7 @@ from core.endpoint_validator import EndpointValidator
 from core.http_client import SafeHttpClient
 from core.redactor import EvidenceRedactor
 from core.run_context import RunContext
+from core.session_signals import SessionSignalAnalyzer
 from core.scope import ScopeManager
 
 
@@ -27,9 +28,24 @@ class SessionCompareItem:
     auth_auth_likely_required: bool
     unauth_response_bytes: int
     auth_response_bytes: int
+    unauth_cache_control: str
+    auth_cache_control: str
+    unauth_vary: str
+    auth_vary: str
+    unauth_set_cookie_count: int
+    auth_set_cookie_count: int
+    unauth_auth_cookie_count: int
+    auth_auth_cookie_count: int
+    unauth_cross_host_redirect_count: int
+    auth_cross_host_redirect_count: int
     status_changed: bool
     accessibility_changed: bool
     auth_requirement_changed: bool
+    cache_policy_changed: bool
+    vary_changed: bool
+    set_cookie_changed: bool
+    auth_cookie_changed: bool
+    cross_host_redirect_changed: bool
     response_size_delta: int
     sensitive_indicators_added: list[str]
     review_signal: str
@@ -70,6 +86,7 @@ class SessionCompareRunner:
         self.client = SafeHttpClient(timeout_seconds=10)
         self.redactor = EvidenceRedactor()
         self.validator = EndpointValidator(scope=scope, run_context=run_context)
+        self.signal_analyzer = SessionSignalAnalyzer(run_context)
         self.output_json_path = self.parsed_dir / "session_compare.json"
         self.output_markdown_path = self.reports_dir / "session_compare.md"
 
@@ -102,7 +119,22 @@ class SessionCompareRunner:
             session_profile_name=session.artifact.session_profile_name,
             generated_at=datetime.now(timezone.utc).isoformat(),
             compared_count=len(items),
-            changed_count=sum(1 for item in items if item.status_changed or item.accessibility_changed or item.auth_requirement_changed),
+            changed_count=sum(
+                1
+                for item in items
+                if any(
+                    [
+                        item.status_changed,
+                        item.accessibility_changed,
+                        item.auth_requirement_changed,
+                        item.cache_policy_changed,
+                        item.vary_changed,
+                        item.set_cookie_changed,
+                        item.auth_cookie_changed,
+                        item.cross_host_redirect_changed,
+                    ]
+                )
+            ),
             accessible_after_auth_count=sum(1 for item in items if not item.unauth_accessible and item.auth_accessible),
             newly_sensitive_count=sum(1 for item in items if item.sensitive_indicators_added),
             results_json_path=str(self.output_json_path),
@@ -180,6 +212,8 @@ class SessionCompareRunner:
 
         unauth = self.client.get(url)
         auth = self.client.get(url, headers=session.headers)
+        unauth_signals = self.signal_analyzer.summarize(unauth)
+        auth_signals = self.signal_analyzer.summarize(auth)
 
         unauth_sample_raw = self.validator._sample_body(unauth.body or "")
         auth_sample_raw = self.validator._sample_body(auth.body or "")
@@ -210,6 +244,17 @@ class SessionCompareRunner:
         accessibility_changed = unauth_accessible != auth_accessible
         auth_requirement_changed = unauth_auth_required != auth_auth_required
         response_size_delta = len(auth.body or "") - len(unauth.body or "")
+        unauth_cache_control = self._normalize_header_value(unauth_signals.security_headers.get("cache-control", ""))
+        auth_cache_control = self._normalize_header_value(auth_signals.security_headers.get("cache-control", ""))
+        unauth_vary = self._normalize_header_value(unauth.headers.get("vary", ""))
+        auth_vary = self._normalize_header_value(auth.headers.get("vary", ""))
+        cache_policy_changed = unauth_cache_control != auth_cache_control
+        vary_changed = unauth_vary != auth_vary
+        set_cookie_changed = unauth_signals.set_cookie_count != auth_signals.set_cookie_count
+        auth_cookie_changed = unauth_signals.auth_cookie_count != auth_signals.auth_cookie_count
+        cross_host_redirect_changed = (
+            unauth_signals.cross_host_redirect_count != auth_signals.cross_host_redirect_count
+        )
 
         notes: list[str] = []
         if status_changed:
@@ -218,6 +263,16 @@ class SessionCompareRunner:
             notes.append("accessibility_changed")
         if auth_requirement_changed:
             notes.append("auth_requirement_changed")
+        if cache_policy_changed:
+            notes.append("cache_policy_changed")
+        if vary_changed:
+            notes.append("vary_changed")
+        if set_cookie_changed:
+            notes.append("set_cookie_changed")
+        if auth_cookie_changed:
+            notes.append("auth_cookie_changed")
+        if cross_host_redirect_changed:
+            notes.append("cross_host_redirect_changed")
         if sensitive_added:
             notes.append("new_sensitive_indicators_after_auth")
         if response_size_delta != 0:
@@ -228,6 +283,16 @@ class SessionCompareRunner:
             auth_status=auth.status_code,
             unauth_accessible=unauth_accessible,
             auth_accessible=auth_accessible,
+            unauth_cache_control=unauth_cache_control,
+            auth_cache_control=auth_cache_control,
+            unauth_vary=unauth_vary,
+            auth_vary=auth_vary,
+            unauth_auth_cookie_count=unauth_signals.auth_cookie_count,
+            auth_auth_cookie_count=auth_signals.auth_cookie_count,
+            cache_policy_changed=cache_policy_changed,
+            vary_changed=vary_changed,
+            set_cookie_changed=set_cookie_changed,
+            cross_host_redirect_changed=cross_host_redirect_changed,
             sensitive_added=sensitive_added,
         )
 
@@ -244,9 +309,24 @@ class SessionCompareRunner:
             auth_auth_likely_required=auth_auth_required,
             unauth_response_bytes=len(unauth.body or ""),
             auth_response_bytes=len(auth.body or ""),
+            unauth_cache_control=unauth_cache_control,
+            auth_cache_control=auth_cache_control,
+            unauth_vary=unauth_vary,
+            auth_vary=auth_vary,
+            unauth_set_cookie_count=unauth_signals.set_cookie_count,
+            auth_set_cookie_count=auth_signals.set_cookie_count,
+            unauth_auth_cookie_count=unauth_signals.auth_cookie_count,
+            auth_auth_cookie_count=auth_signals.auth_cookie_count,
+            unauth_cross_host_redirect_count=unauth_signals.cross_host_redirect_count,
+            auth_cross_host_redirect_count=auth_signals.cross_host_redirect_count,
             status_changed=status_changed,
             accessibility_changed=accessibility_changed,
             auth_requirement_changed=auth_requirement_changed,
+            cache_policy_changed=cache_policy_changed,
+            vary_changed=vary_changed,
+            set_cookie_changed=set_cookie_changed,
+            auth_cookie_changed=auth_cookie_changed,
+            cross_host_redirect_changed=cross_host_redirect_changed,
             response_size_delta=response_size_delta,
             sensitive_indicators_added=sensitive_added,
             review_signal=review_signal,
@@ -261,6 +341,16 @@ class SessionCompareRunner:
         auth_status: int | None,
         unauth_accessible: bool,
         auth_accessible: bool,
+        unauth_cache_control: str,
+        auth_cache_control: str,
+        unauth_vary: str,
+        auth_vary: str,
+        unauth_auth_cookie_count: int,
+        auth_auth_cookie_count: int,
+        cache_policy_changed: bool,
+        vary_changed: bool,
+        set_cookie_changed: bool,
+        cross_host_redirect_changed: bool,
         sensitive_added: list[str],
     ) -> str:
         if not unauth_accessible and auth_accessible:
@@ -281,10 +371,41 @@ class SessionCompareRunner:
                 "Keep evidence redacted and validate business context manually."
             )
 
+        if cache_policy_changed and auth_auth_cookie_count > 0:
+            return (
+                "Authenticated context changed cache policy on a cookie-bearing response. "
+                "Review whether anonymous and authenticated variants are segregated clearly enough for shared-cache safety."
+            )
+
+        if vary_changed and auth_auth_cookie_count > 0 and not self._varies_on_session_state(auth_vary):
+            return (
+                "Authenticated response headers changed, but Vary still does not clearly advertise session state. "
+                "Review cache-key separation and whether authenticated variants remain isolated."
+            )
+
+        if auth_auth_cookie_count > unauth_auth_cookie_count or set_cookie_changed:
+            return (
+                "Authenticated context changed cookie bootstrap behavior. Review whether the session boundary and "
+                "downstream cache behavior are consistent with the program's authentication model."
+            )
+
+        if cross_host_redirect_changed:
+            return (
+                "Authenticated context changed the cross-host redirect pattern. Review whether session handling stays "
+                "consistent across host boundaries."
+            )
+
         if unauth_status != auth_status:
             return "Observed a response status change between unauthenticated and authenticated requests."
 
         return "No material session-driven difference observed for this endpoint."
+
+    def _normalize_header_value(self, value: str | None) -> str:
+        return " ".join(str(value or "").strip().split())
+
+    def _varies_on_session_state(self, vary_value: str) -> bool:
+        lowered = (vary_value or "").lower()
+        return "cookie" in lowered or "authorization" in lowered
 
     def _build_markdown(self, summary: SessionCompareSummary) -> str:
         lines: list[str] = []
@@ -319,6 +440,16 @@ class SessionCompareRunner:
             lines.append(f"- **Auth Status:** `{item.get('auth_status_code')}`")
             lines.append(f"- **Unauth Accessible:** `{item.get('unauth_accessible')}`")
             lines.append(f"- **Auth Accessible:** `{item.get('auth_accessible')}`")
+            lines.append(f"- **Unauth Cache-Control:** `{item.get('unauth_cache_control') or '(none)'}`")
+            lines.append(f"- **Auth Cache-Control:** `{item.get('auth_cache_control') or '(none)'}`")
+            lines.append(f"- **Unauth Vary:** `{item.get('unauth_vary') or '(none)'}`")
+            lines.append(f"- **Auth Vary:** `{item.get('auth_vary') or '(none)'}`")
+            lines.append(f"- **Unauth Set-Cookie Count:** `{item.get('unauth_set_cookie_count')}`")
+            lines.append(f"- **Auth Set-Cookie Count:** `{item.get('auth_set_cookie_count')}`")
+            lines.append(f"- **Unauth Auth-Like Cookies:** `{item.get('unauth_auth_cookie_count')}`")
+            lines.append(f"- **Auth Auth-Like Cookies:** `{item.get('auth_auth_cookie_count')}`")
+            lines.append(f"- **Cache Policy Changed:** `{item.get('cache_policy_changed')}`")
+            lines.append(f"- **Vary Changed:** `{item.get('vary_changed')}`")
             lines.append(f"- **Response Size Delta:** `{item.get('response_size_delta')}`")
             lines.append(f"- **Sensitive Added:** `{item.get('sensitive_indicators_added')}`")
             lines.append("")

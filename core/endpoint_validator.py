@@ -208,6 +208,23 @@ class EndpointValidator:
                             source=f"finding:{finding.get('source', 'unknown')}",
                         )
 
+        high_value_routes_path = self.parsed_dir / "high_value_route_candidates.json"
+        if high_value_routes_path.exists():
+            data = self._read_json(high_value_routes_path)
+            for item in data.get("candidates", []):
+                if not isinstance(item, dict):
+                    continue
+                self._add_candidate(
+                    candidates=candidates,
+                    seen=seen,
+                    url=str(item.get("target", "")),
+                    source=(
+                        "high_value_route:"
+                        f"{item.get('source_probe_kind', 'unknown')}:"
+                        f"{item.get('source_check_id', 'unknown')}"
+                    ),
+                )
+
         return candidates
 
     def _add_candidate(

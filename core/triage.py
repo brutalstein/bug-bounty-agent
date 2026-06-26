@@ -42,8 +42,11 @@ class TriageEngine:
 
         candidates.extend(self._candidates_from_js_analysis())
         candidates.extend(self._candidates_from_endpoint_validation())
+        candidates.extend(self._candidates_from_high_value_recon())
         candidates.extend(self._candidates_from_session_signals())
         candidates.extend(self._candidates_from_session_surface_compare())
+        candidates.extend(self._candidates_from_session_compare())
+        candidates.extend(self._candidates_from_passive_surface_diff())
         candidates.extend(self._candidates_from_browser_surface_compare())
 
         deduped = self._deduplicate(candidates)
@@ -222,6 +225,120 @@ class TriageEngine:
                 )
 
         return candidates
+
+    def _candidates_from_high_value_recon(self) -> list[TriageCandidate]:
+        path = self.parsed_dir / "high_value_recon.json"
+
+        if not path.exists():
+            return []
+
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            return []
+
+        items = data.get("items", [])
+        candidates: list[TriageCandidate] = []
+
+        if not isinstance(items, list):
+            return candidates
+
+        for item in items:
+            if not isinstance(item, dict) or item.get("interesting") is not True:
+                continue
+
+            target = str(item.get("target", "unknown"))
+            probe_kind = str(item.get("probe_kind", "unknown"))
+            matched_signals = item.get("matched_signals", [])
+            sensitive_indicators = item.get("sensitive_indicators", [])
+            exposure_likely = item.get("exposure_likely") is True
+            risk_hint = str(item.get("risk_hint", ""))
+            response_sample = str(item.get("response_sample", ""))
+            check_id = str(item.get("check_id", "unknown"))
+            extracted_routes = item.get("extracted_routes", [])
+
+            if probe_kind == "api_schema":
+                category = "public_api_schema_review"
+                priority = "high"
+                reason = "Public API schema or documentation surface appears reachable with a read-only request."
+                actions = [
+                    "Review the schema for sensitive routes, hidden models, or privileged operations.",
+                    "Prefer public documentation correlation before requesting deeper manual validation.",
+                    "Do not treat schema presence alone as reportable without impact.",
+                ]
+            elif probe_kind == "graphql":
+                category = "graphql_surface_review"
+                priority = "high"
+                reason = "A GraphQL-like public surface responded with recognizable markers."
+                actions = [
+                    "Check whether the surface exposes schema or operation hints via safe read-only requests.",
+                    "Map whether the route is public, authenticated, or documentation-linked.",
+                    "Do not attempt mutation or intrusive query abuse without explicit policy allowance.",
+                ]
+            elif probe_kind == "client_config":
+                category = "public_client_config_review"
+                priority = "high" if exposure_likely or sensitive_indicators else "medium"
+                reason = "A public config-style response exposed application wiring or environment markers."
+                actions = [
+                    "Review the redacted sample for exposed environment, telemetry, or service-integration hints.",
+                    "Check whether the file should be public and whether it leaks more than bootstrap metadata.",
+                    "Do not claim a vulnerability unless sensitive impact is demonstrated.",
+                ]
+            else:
+                category = "public_route_inventory_review"
+                priority = "medium"
+                reason = "A public discovery file exposed potentially useful route inventory."
+                actions = [
+                    "Review listed routes for admin, API, auth, or debug surfaces.",
+                    "Use these routes as future safe validation candidates.",
+                    "Do not report public route inventory without a concrete security weakness.",
+                ]
+
+            candidates.append(
+                TriageCandidate(
+                    candidate_id=self._make_id("high-value-recon", check_id, target),
+                    priority=priority,
+                    category=category,
+                    target=target,
+                    reason=reason,
+                    source_finding_ids=[],
+                    recommended_safe_actions=actions,
+                    requires_manual_approval=exposure_likely,
+                    reportable_now=False,
+                    notes=self._compact_note(
+                        risk_hint=risk_hint,
+                        matched_signals=matched_signals,
+                        sensitive_indicators=sensitive_indicators,
+                        extracted_routes=extracted_routes,
+                        sample=response_sample,
+                    ),
+                )
+            )
+
+        return candidates
+
+    def _compact_note(
+        self,
+        risk_hint: str,
+        matched_signals: list | object,
+        sensitive_indicators: list | object,
+        extracted_routes: list | object,
+        sample: str,
+    ) -> str:
+        route_count = len(extracted_routes) if isinstance(extracted_routes, list) else 0
+        summary = (
+            f"{risk_hint} "
+            f"Signals: {matched_signals}. "
+            f"Indicators: {sensitive_indicators}. "
+            f"Harvested routes: {route_count}."
+        ).strip()
+
+        if sample:
+            compact_sample = sample.replace("\n", " ").strip()[:220]
+            if compact_sample:
+                summary = f"{summary} Sample: {compact_sample}"
+
+        return summary.strip()
 
     def _candidates_from_session_signals(self) -> list[TriageCandidate]:
         path = self.parsed_dir / "session_signals.json"
@@ -409,6 +526,152 @@ class TriageEngine:
             )
 
         return candidates
+
+    def _candidates_from_passive_surface_diff(self) -> list[TriageCandidate]:
+        path = self.parsed_dir / "passive_surface_diff.json"
+
+        if not path.exists():
+            return []
+
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            return []
+
+        hypotheses = data.get("hypotheses", [])
+        candidates: list[TriageCandidate] = []
+
+        if not isinstance(hypotheses, list):
+            return candidates
+
+        for item in hypotheses:
+            if not isinstance(item, dict):
+                continue
+
+            hypothesis_id = str(item.get("hypothesis_id", "unknown"))
+            category = str(item.get("category", "passive_surface_review"))
+            severity = str(item.get("severity", "medium")).lower()
+            title = str(item.get("title", "Passive surface review"))
+            rationale = str(item.get("rationale", ""))
+            affected_surfaces = item.get("affected_surfaces", [])
+            supporting_signals = item.get("supporting_signals", [])
+            safe_next_steps = item.get("safe_next_steps", [])
+
+            target = "unknown"
+            if isinstance(affected_surfaces, list) and affected_surfaces:
+                target = str(affected_surfaces[0])
+
+            priority_map = {
+                "high": "high",
+                "medium": "high",
+                "low": "medium",
+            }
+
+            candidates.append(
+                TriageCandidate(
+                    candidate_id=self._make_id("passive-surface-diff", hypothesis_id, target),
+                    priority=priority_map.get(severity, "medium"),
+                    category=category,
+                    target=target,
+                    reason=title,
+                    source_finding_ids=[],
+                    recommended_safe_actions=(
+                        safe_next_steps
+                        if isinstance(safe_next_steps, list) and safe_next_steps
+                        else [
+                            "Keep the review read-only and correlate with stronger session or auth evidence.",
+                            "Do not claim impact until confidentiality or cross-user risk is better supported.",
+                        ]
+                    ),
+                    requires_manual_approval=True,
+                    reportable_now=False,
+                    notes=f"{rationale} Signals: {supporting_signals}",
+                )
+            )
+
+        return candidates
+
+    def _candidates_from_session_compare(self) -> list[TriageCandidate]:
+        path = self.parsed_dir / "session_compare.json"
+
+        if not path.exists():
+            return []
+
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            return []
+
+        items = data.get("items", [])
+        candidates: list[TriageCandidate] = []
+
+        if not isinstance(items, list):
+            return candidates
+
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+
+            category = self._session_compare_category(item)
+            if not category:
+                continue
+
+            target = str(item.get("url", "unknown"))
+            compare_id = str(item.get("compare_id", "unknown"))
+            review_signal = str(item.get("review_signal", "")).strip() or "Authenticated and anonymous behavior diverged."
+
+            priority = "medium"
+            if category in {
+                "authenticated_access_boundary_review",
+                "authenticated_sensitive_response_review",
+                "authenticated_cache_policy_variance_review",
+            }:
+                priority = "high"
+
+            candidates.append(
+                TriageCandidate(
+                    candidate_id=self._make_id("session-compare", compare_id, target, category),
+                    priority=priority,
+                    category=category,
+                    target=target,
+                    reason=review_signal,
+                    source_finding_ids=[],
+                    recommended_safe_actions=[
+                        "Repeat only with low-rate read-only requests and the same authorized session profile.",
+                        "Compare anonymous and authenticated headers, redirects, and cache behavior side by side.",
+                        "Do not claim impact until cross-user exposure, broken authorization, or sensitive data handling risk is supported.",
+                    ],
+                    requires_manual_approval=True,
+                    reportable_now=False,
+                    notes=f"Session compare notes: {item.get('notes', [])}",
+                )
+            )
+
+        return candidates
+
+    def _session_compare_category(self, item: dict) -> str:
+        if item.get("sensitive_indicators_added"):
+            return "authenticated_sensitive_response_review"
+
+        if item.get("accessibility_changed") is True or item.get("auth_requirement_changed") is True:
+            return "authenticated_access_boundary_review"
+
+        if item.get("cache_policy_changed") is True and (
+            int(item.get("unauth_auth_cookie_count", 0)) > 0
+            or int(item.get("auth_auth_cookie_count", 0)) > 0
+        ):
+            return "authenticated_cache_policy_variance_review"
+
+        if item.get("auth_cookie_changed") is True or item.get("set_cookie_changed") is True:
+            return "authenticated_cookie_bootstrap_review"
+
+        if item.get("vary_changed") is True or item.get("cross_host_redirect_changed") is True:
+            return "authenticated_session_header_variance_review"
+
+        if item.get("status_changed") is True:
+            return "authenticated_behavior_variance_review"
+
+        return ""
 
     def _candidates_from_js_analysis(self) -> list[TriageCandidate]:
         path = self.parsed_dir / "js_analysis.json"

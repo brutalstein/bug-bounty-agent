@@ -5,6 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VENV_DIR="$ROOT_DIR/.venv"
 REQ_FILE="$ROOT_DIR/requirements.txt"
 REQ_HASH_FILE="$VENV_DIR/.bb_requirements.sha256"
+ENV_FILE="$ROOT_DIR/.env"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 PLAYWRIGHT_SKIP="${BB_SKIP_BROWSER_SETUP:-0}"
 
@@ -50,6 +51,22 @@ say_fail() {
 
 say_step() {
   printf "%s %s %s\n" "$(color "1;38;5;213" "$icon_step")" "$(color "1;38;5;213" "STEP")" "$*"
+}
+
+ensure_env_file() {
+  if [[ ! -f "$ENV_FILE" ]]; then
+    say_fail "Missing required .env file: $ENV_FILE"
+    say_info "Create it from .env.example before running the CLI."
+    exit 1
+  fi
+}
+
+load_env_file() {
+  set -a
+  # shellcheck disable=SC1090
+  source "$ENV_FILE"
+  set +a
+  say_ok ".env loaded"
 }
 
 ensure_python() {
@@ -145,6 +162,8 @@ EOF
 main() {
   say_banner
   ensure_python
+  ensure_env_file
+  load_env_file
   ensure_venv
   activate_venv
   install_requirements_if_needed

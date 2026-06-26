@@ -6,6 +6,7 @@ from urllib.parse import urlparse
 import os
 import shutil
 
+from core.env_loader import DEFAULT_ENV_PATH
 from core.scope import ScopeManager
 
 
@@ -44,6 +45,17 @@ class ProfileReadinessAssessor:
         blockers: list[ReadinessIssue] = []
         warnings: list[ReadinessIssue] = []
         checks: list[str] = []
+
+        if not DEFAULT_ENV_PATH.exists():
+            blockers.append(
+                ReadinessIssue(
+                    severity="blocker",
+                    code="missing_env_file",
+                    message="Required `.env` file is missing. Create it from `.env.example` before using the CLI.",
+                )
+            )
+        else:
+            checks.append("env_file_present")
 
         if not config.policy.program_name.strip():
             blockers.append(
@@ -197,13 +209,14 @@ class ProfileReadinessAssessor:
         for item in self.scope.list_session_profiles():
             token_env = str(item.get("token_env", "")).strip()
             if token_env and not str(os.getenv(token_env, "")).strip():
-                warnings.append(
+                blockers.append(
                     ReadinessIssue(
-                        severity="warning",
+                        severity="blocker",
                         code=f"session_env_missing:{item['name']}",
                         message=(
                             f"Session profile `{item['name']}` expects token material in `{token_env}`, "
-                            "but that environment variable is not currently set."
+                            "but that environment variable is not currently set. "
+                            "Populate it in `.env` before authenticated program testing."
                         ),
                     )
                 )

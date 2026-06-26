@@ -36,6 +36,9 @@ runs/
 ```bash
 cd ~/bug-bounty-agent
 
+cp .env.example .env
+# populate .env with your authorized secrets before continuing
+
 ./bb.sh doctor
 ./bb.sh profiles
 ./bb.sh config --profile owasp-juice-shop-local
@@ -79,6 +82,7 @@ python app/main.py profile-readiness --profile owasp-juice-shop-local --target h
 
 ## Notes
 
+- `.env` is required and loaded automatically by both `./bb.sh` and `python app/main.py`.
 - `runs/` contains local execution artifacts and is intentionally ignored from Git.
 - Nmap and other higher-risk tooling remain postponed until policy parsing, onboarding, and manual approval gates are fully mature.
 - If a profile does not explicitly set `allow_port_scan: true`, `nmap-scan` fails safely.
