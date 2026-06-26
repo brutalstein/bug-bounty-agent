@@ -25,6 +25,10 @@ SECTION_ORDER: list[tuple[str, list[str]]] = [
     (
         "Agent runtime",
         [
+            "LLM_PROVIDER",
+            "OPENAI_BASE_URL",
+            "OPENAI_MODEL",
+            "OPENAI_API_KEY",
             "OLLAMA_BASE_URL",
             "OLLAMA_MODEL",
             "BB_SKIP_BROWSER_SETUP",
@@ -49,8 +53,12 @@ SECTION_ORDER: list[tuple[str, list[str]]] = [
 ]
 
 DEFAULT_VALUES = {
+    "LLM_PROVIDER": "auto",
+    "OPENAI_BASE_URL": "https://api.openai.com/v1",
+    "OPENAI_MODEL": "gpt-5.4-mini",
+    "OPENAI_API_KEY": "",
     "OLLAMA_BASE_URL": "http://localhost:11434",
-    "OLLAMA_MODEL": "mistral:7b",
+    "OLLAMA_MODEL": "qwen3:8b",
     "BB_SKIP_BROWSER_SETUP": "0",
     "BB_CLI_MINIMAL": "0",
     "BB_VERBOSE_LOGS": "0",
@@ -61,6 +69,10 @@ DEFAULT_VALUES = {
 }
 
 KEY_COMMENTS = {
+    "LLM_PROVIDER": "LLM backend selection: auto, openai, ollama, or fallback.",
+    "OPENAI_BASE_URL": "Official OpenAI API base URL. Leave as-is unless you use a compatible proxy.",
+    "OPENAI_MODEL": "Recommended current hosted model for short structured signal triage loops.",
+    "OPENAI_API_KEY": "Optional OpenAI API key. If present, the agent prefers OpenAI before Ollama.",
     "OLLAMA_BASE_URL": "Optional local LLM endpoint. Leave as-is unless Ollama is running elsewhere.",
     "OLLAMA_MODEL": "Recommended local model for signal review. Safe fallback logic is used when Ollama is offline.",
     "BB_SKIP_BROWSER_SETUP": "Set to 1 to skip Playwright Chromium bootstrap.",
@@ -215,9 +227,9 @@ def main() -> int:
             print_line("WARN", f"{status.label} is not installed yet. The agent will keep using safe fallbacks where possible.")
 
     if shutil.which("ollama"):
-        print_line("OK", "Ollama detected. Local LLM-assisted signal review can be enabled with the default mistral:7b setting.")
+        print_line("OK", "Ollama detected. Local LLM-assisted signal review can be enabled with the default qwen3:8b setting.")
     else:
-        print_line("INFO", "Ollama not detected. Hunts will continue with deterministic rule-based reasoning until you install it.")
+        print_line("INFO", "Ollama not detected. If you add OPENAI_API_KEY, the agent can use the hosted OpenAI model instead.")
 
     print_line("INFO", "Manual step still required for real-program authenticated testing: populate your own API keys in `.env` when needed.")
     print_line("INFO", "Next step: run `./bb.sh doctor` or `./bb.sh hunt --profile owasp-juice-shop-local http://localhost:3000`.")

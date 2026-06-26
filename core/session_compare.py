@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlparse
 import json
 
 from core.auth_session import AuthenticatedSession
@@ -67,6 +68,7 @@ class SessionCompareSummary:
     changed_count: int
     accessible_after_auth_count: int
     newly_sensitive_count: int
+    strategy_notes: list[str]
     results_json_path: str
     report_markdown_path: str
     items: list[dict]
@@ -137,6 +139,7 @@ class SessionCompareRunner:
             ),
             accessible_after_auth_count=sum(1 for item in items if not item.unauth_accessible and item.auth_accessible),
             newly_sensitive_count=sum(1 for item in items if item.sensitive_indicators_added),
+            strategy_notes=self._strategy_notes(items, session),
             results_json_path=str(self.output_json_path),
             report_markdown_path=str(self.output_markdown_path),
             items=[item.to_dict() for item in items],
@@ -171,34 +174,134 @@ class SessionCompareRunner:
         max_endpoints: int,
         include_only_interesting: bool,
     ) -> list[dict]:
-        if not isinstance(endpoint_validation, dict):
-            return []
+        candidates: list[dict] = []
+        seen: set[str] = set()
 
-        results = endpoint_validation.get("results", [])
-        if not isinstance(results, list):
-            return []
-
-        selected: list[dict] = []
-
-        for result in results:
-            if not isinstance(result, dict):
-                continue
-
-            url = str(result.get("url", "")).strip()
-            if not url or not self.scope.is_target_allowed(url):
-                continue
-
-            if include_only_interesting:
-                if not (
-                    result.get("interesting") is True
-                    or result.get("auth_likely_required") is True
-                    or result.get("exposure_likely") is True
-                ):
+        results = endpoint_validation.get("results", []) if isinstance(endpoint_validation, dict) else []
+        if isinstance(results, list):
+            for result in results:
+                if not isinstance(result, dict):
                     continue
+                self._add_candidate(candidates, seen, result)
 
-            selected.append(result)
+        for result in self._seeded_surface_targets():
+            self._add_candidate(candidates, seen, result)
 
-        return selected[:max_endpoints]
+        ranked = sorted(
+            candidates,
+            key=lambda item: self._candidate_rank_key(item, include_only_interesting),
+            reverse=True,
+        )
+
+        filtered: list[dict] = []
+        for item in ranked:
+            if include_only_interesting and not self._candidate_is_compare_worthy(item):
+                continue
+            filtered.append(item)
+
+        if not filtered and include_only_interesting:
+            filtered = ranked
+
+        return filtered[:max_endpoints]
+
+    def _seeded_surface_targets(self) -> list[dict]:
+        seeded: list[dict] = []
+
+        scope_targets = self._read_json_any(self.parsed_dir / "surface_recon_scope_targets.json")
+        if isinstance(scope_targets, list):
+            for item in scope_targets:
+                if not isinstance(item, dict):
+                    continue
+                url = str(item.get("normalized_url") or item.get("target") or "").strip()
+                if not url or not self.scope.is_target_allowed(url):
+                    continue
+                seeded.append(
+                    {
+                        "url": url,
+                        "source": "surface_recon_scope_target",
+                        "category": self.validator._classify_endpoint(url),
+                        "interesting": self._matches_focus_keyword(url),
+                        "accessible": True,
+                        "auth_likely_required": False,
+                        "exposure_likely": False,
+                    }
+                )
+
+        high_value_routes = self._read_json_any(self.parsed_dir / "high_value_route_candidates.json")
+        if isinstance(high_value_routes, dict):
+            for item in high_value_routes.get("candidates", []):
+                if not isinstance(item, dict):
+                    continue
+                url = str(item.get("target", "")).strip()
+                if not url or not self.scope.is_target_allowed(url):
+                    continue
+                seeded.append(
+                    {
+                        "url": url,
+                        "source": (
+                            "high_value_route:"
+                            f"{item.get('source_probe_kind', 'unknown')}:"
+                            f"{item.get('source_check_id', 'unknown')}"
+                        ),
+                        "category": self.validator._classify_endpoint(url),
+                        "interesting": self._matches_focus_keyword(url),
+                        "accessible": True,
+                        "auth_likely_required": False,
+                        "exposure_likely": False,
+                    }
+                )
+
+        return seeded
+
+    def _add_candidate(self, candidates: list[dict], seen: set[str], candidate: dict) -> None:
+        url = str(candidate.get("url", "")).strip()
+        if not url or not self.scope.is_target_allowed(url):
+            return
+        if url in seen:
+            return
+        seen.add(url)
+        candidates.append(candidate)
+
+    def _candidate_rank_key(self, item: dict, include_only_interesting: bool) -> tuple[int, int, int, int]:
+        url = str(item.get("url", "")).strip()
+        category = str(item.get("category") or self.validator._classify_endpoint(url))
+        interesting = item.get("interesting") is True
+        auth_required = item.get("auth_likely_required") is True
+        exposure = item.get("exposure_likely") is True
+        focus_match = self._matches_focus_keyword(url)
+        source = str(item.get("source", ""))
+        source_bonus = 2 if source.startswith("surface_recon_scope_target") else 1 if source.startswith("high_value_route:") else 0
+        category_score = {
+            "authentication_surface": 6,
+            "api_surface": 5,
+            "admin_or_privileged_area": 5,
+            "user_data_surface": 5,
+            "input_surface": 4,
+            "generic_endpoint": 1,
+        }.get(category, 2)
+        interest_score = int(interesting) + int(auth_required) + int(exposure)
+        if include_only_interesting and focus_match:
+            interest_score += 1
+        return (interest_score, int(focus_match), category_score, source_bonus)
+
+    def _candidate_is_compare_worthy(self, item: dict) -> bool:
+        url = str(item.get("url", "")).strip()
+        category = str(item.get("category") or self.validator._classify_endpoint(url))
+        if item.get("interesting") is True or item.get("auth_likely_required") is True or item.get("exposure_likely") is True:
+            return True
+        if self._matches_focus_keyword(url):
+            return True
+        return category in {"authentication_surface", "api_surface", "admin_or_privileged_area", "user_data_surface"}
+
+    def _matches_focus_keyword(self, url: str) -> bool:
+        lowered = url.lower()
+        for area in self.scope.config.policy.focus_areas:
+            if not isinstance(area, dict):
+                continue
+            for keyword in area.get("path_keywords", []):
+                if str(keyword).strip().lower() in lowered:
+                    return True
+        return False
 
     def _compare_single(
         self,
@@ -425,6 +528,12 @@ class SessionCompareRunner:
         lines.append(f"- **Accessible After Auth:** `{summary.accessible_after_auth_count}`")
         lines.append(f"- **New Sensitive Indicators After Auth:** `{summary.newly_sensitive_count}`")
         lines.append("")
+        if summary.strategy_notes:
+            lines.append("## Strategy Notes")
+            lines.append("")
+            for note in summary.strategy_notes:
+                lines.append(f"- {note}")
+            lines.append("")
 
         if not summary.items:
             lines.append("No endpoints were selected for session comparison.")
@@ -481,6 +590,43 @@ class SessionCompareRunner:
 
         return "\n".join(lines)
 
+    def _strategy_notes(
+        self,
+        items: list[SessionCompareItem],
+        session: AuthenticatedSession,
+    ) -> list[str]:
+        notes: list[str] = []
+        if not items:
+            return notes
+
+        if session.artifact.kind == "static_bearer_token":
+            if all(
+                not any(
+                    [
+                        item.status_changed,
+                        item.accessibility_changed,
+                        item.auth_requirement_changed,
+                        item.cache_policy_changed,
+                        item.vary_changed,
+                        item.set_cookie_changed,
+                        item.auth_cookie_changed,
+                        item.cross_host_redirect_changed,
+                        item.sensitive_indicators_added,
+                    ]
+                )
+                for item in items
+            ):
+                notes.append(
+                    "Static bearer token produced no observable difference across the selected surfaces. "
+                    "This usually means the current surface set is web-public or cookie-driven rather than Authorization-header-aware."
+                )
+                notes.append(
+                    "Next real-program step: seed more API-specific or token-aware routes under in-scope hosts such as "
+                    "`api-staging.airtable.com`, then repeat the same read-only comparison."
+                )
+
+        return notes
+
     def _read_json(self, path: Path) -> dict:
         if not path.exists():
             return {}
@@ -491,3 +637,12 @@ class SessionCompareRunner:
             return {}
 
         return data if isinstance(data, dict) else {}
+
+    def _read_json_any(self, path: Path) -> dict | list:
+        if not path.exists():
+            return {}
+
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            return {}

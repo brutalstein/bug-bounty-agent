@@ -109,8 +109,15 @@ class CandidateRanker:
         confidence_score = self._confidence_score(item)
         impact_score = self._impact_score(item)
         noise_score = self._noise_score(item)
+        signal_alignment_score = self._signal_alignment_score(item)
 
-        raw_score = priority_score + confidence_score + impact_score - noise_score
+        raw_score = (
+            priority_score
+            + confidence_score
+            + impact_score
+            + signal_alignment_score
+            - noise_score
+        )
         final_score = max(0, min(100, raw_score))
 
         final_bucket = self._bucket(
@@ -126,6 +133,7 @@ class CandidateRanker:
             confidence_score=confidence_score,
             impact_score=impact_score,
             noise_score=noise_score,
+            signal_alignment_score=signal_alignment_score,
             final_bucket=final_bucket,
         )
 
@@ -383,6 +391,54 @@ class CandidateRanker:
 
         return min(score, 60)
 
+    def _signal_alignment_score(self, item: dict) -> int:
+        category = str(item.get("category", "")).lower()
+        target = str(item.get("target", "")).lower()
+        notes = str(item.get("notes", "")).lower()
+        reportability = str(item.get("reportability", "")).lower()
+
+        if self._is_core_ineligible_pattern(item):
+            return 0
+
+        score = 0
+        highest_value_categories = [
+            "potential_auth_bypass",
+            "potential_unauthenticated_admin_access",
+            "potential_unauthenticated_api_data_exposure",
+            "potential_sensitive_exposure",
+            "idor_candidate",
+            "authenticated_access_boundary_review",
+            "authenticated_sensitive_response_review",
+        ]
+        medium_value_categories = [
+            "validated_admin_surface",
+            "validated_user_data_surface",
+            "validated_api_surface",
+            "validated_authentication_surface",
+            "graphql_surface_review",
+            "public_api_schema_review",
+            "cross_surface_session_bootstrap_review",
+        ]
+
+        if any(value in category for value in highest_value_categories):
+            score += 16
+        elif any(value in category for value in medium_value_categories):
+            score += 9
+
+        if any(token in target for token in ["/api/", "/graphql", "/auth", "/session", "/internal/", "/workspace", "/record", "/base"]):
+            score += 4
+
+        if any(token in notes for token in ["cross-user", "access boundary", "sensitive", "anonymous", "authenticated"]):
+            score += 3
+
+        if reportability == "potential_report_candidate":
+            score += 4
+
+        if category in self._priority_categories():
+            score += 4
+
+        return min(score, 22)
+
     def _bucket(
         self,
         final_score: int,
@@ -416,6 +472,7 @@ class CandidateRanker:
         confidence_score: int,
         impact_score: int,
         noise_score: int,
+        signal_alignment_score: int,
         final_bucket: str,
     ) -> list[str]:
         reasons = [
@@ -424,6 +481,7 @@ class CandidateRanker:
             f"Priority contribution: {priority_score}",
             f"Confidence contribution: {confidence_score}",
             f"Impact contribution: {impact_score}",
+            f"Signal-alignment contribution: {signal_alignment_score}",
             f"Noise penalty: {noise_score}",
         ]
 

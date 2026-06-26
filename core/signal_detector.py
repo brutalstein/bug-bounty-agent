@@ -81,6 +81,7 @@ class SignalDetector:
         self.reports_dir.mkdir(parents=True, exist_ok=True)
         self.output_json_path = self.parsed_dir / "signals.json"
         self.output_markdown_path = self.reports_dir / "signals.md"
+        self.policy_snapshot = self._read_json(self.parsed_dir / "policy_snapshot.json")
 
     def detect(self) -> SignalDetectionSummary:
         run_data = self._read_json(self.run_dir / "run.json")
@@ -96,6 +97,7 @@ class SignalDetector:
         signals.extend(self._signals_from_js_analysis(js_analysis, seen))
         signals.extend(self._signals_from_ranked_candidates(ranked_candidates, seen))
         signals.extend(self._signals_from_session_compare(session_compare, seen))
+        signals = [self._apply_policy_alignment(item) for item in signals]
 
         sorted_signals = sorted(
             signals,
@@ -480,6 +482,37 @@ class SignalDetector:
             findings=[],
         )
 
+    def _apply_policy_alignment(self, signal: VulnSignal) -> VulnSignal:
+        signal.evidence = dict(signal.evidence or {})
+        signal.evidence["review_lane"] = self._review_lane(signal)
+        signal.evidence["focus_keyword_match"] = self._matches_focus_keyword(signal.endpoint)
+
+        if signal.signal_type in {
+            "AUTH_BYPASS",
+            "IDOR",
+            "SENSITIVE_DATA",
+            "BROKEN_ACCESS_CONTROL",
+            "ADMIN_EXPOSURE",
+        }:
+            signal.confidence = round(min(0.95, signal.confidence + 0.05), 2)
+            signal.evidence["signal_alignment"] = "high_value_access_or_data_boundary"
+            if signal.signal_type != "SENSITIVE_DATA":
+                signal.bounty_potential = "$$$"
+
+        if signal.evidence["focus_keyword_match"]:
+            signal.confidence = round(min(0.95, signal.confidence + 0.03), 2)
+
+        if self._is_core_ineligible_signal(signal):
+            signal.priority = "LOW"
+            signal.confidence = round(min(signal.confidence, 0.3), 2)
+            signal.bounty_potential = "$"
+            signal.evidence["policy_deprioritized"] = True
+        else:
+            signal.evidence["policy_deprioritized"] = False
+
+        signal.investigation_budget = self._budget_for_priority(signal.priority)
+        return signal
+
     def _budget_for_priority(self, priority: str) -> int:
         return {
             "CRITICAL": 5,
@@ -565,6 +598,58 @@ class SignalDetector:
         ]
         return any(marker in lowered for marker in markers)
 
+    def _priority_categories(self) -> set[str]:
+        return {
+            str(item).strip().lower()
+            for item in self.policy_snapshot.get("priority_categories", [])
+        }
+
+    def _focus_path_keywords(self) -> set[str]:
+        keywords: set[str] = set()
+        for area in self.policy_snapshot.get("focus_areas", []):
+            if not isinstance(area, dict):
+                continue
+            for item in area.get("path_keywords", []):
+                keywords.add(str(item).strip().lower())
+        return keywords
+
+    def _core_ineligible_findings(self) -> set[str]:
+        return {
+            str(item).strip().lower()
+            for item in self.policy_snapshot.get("core_ineligible_findings", [])
+        }
+
+    def _matches_focus_keyword(self, endpoint: str) -> bool:
+        lowered = endpoint.lower()
+        return any(keyword and keyword in lowered for keyword in self._focus_path_keywords())
+
+    def _review_lane(self, signal: VulnSignal) -> str:
+        if signal.signal_type in {
+            "AUTH_BYPASS",
+            "IDOR",
+            "SENSITIVE_DATA",
+            "BROKEN_ACCESS_CONTROL",
+            "ADMIN_EXPOSURE",
+        }:
+            return "critical"
+        if signal.signal_type in {"JWT_ISSUES", "SSRF_CANDIDATE", "INFO_DISCLOSURE"}:
+            return "medium"
+        return "easy"
+
+    def _is_core_ineligible_signal(self, signal: VulnSignal) -> bool:
+        ineligible = self._core_ineligible_findings()
+        signal_type = signal.signal_type.upper()
+
+        if signal_type == "CORS_MISCONFIG" and "permissive_cors_without_impact" in ineligible:
+            return True
+        if signal_type == "OPEN_REDIRECT" and "open_redirect_without_additional_impact" in ineligible:
+            return True
+        if signal_type == "INFO_DISCLOSURE" and "software_version_disclosure_only" in ineligible:
+            matched_rule = str(signal.evidence.get("matched_rule", "")).lower()
+            return "stack" not in matched_rule and "error" not in matched_rule
+
+        return False
+
     def _build_markdown(self, summary: SignalDetectionSummary) -> str:
         lines: list[str] = []
         lines.append("# Vulnerability Signals")
@@ -594,10 +679,15 @@ class SignalDetector:
             lines.append(f"- **Priority:** `{item.get('priority')}`")
             lines.append(f"- **Confidence:** `{item.get('confidence')}`")
             lines.append(f"- **Bounty Potential:** `{item.get('bounty_potential')}`")
+            review_lane = item.get("evidence", {}).get("review_lane")
+            if review_lane:
+                lines.append(f"- **Review Lane:** `{review_lane}`")
             lines.append(f"- **Investigation Budget:** `{item.get('investigation_budget')}`")
             matched_rule = item.get("evidence", {}).get("matched_rule", "")
             if matched_rule:
                 lines.append(f"- **Matched Rule:** `{matched_rule}`")
+            if item.get("evidence", {}).get("policy_deprioritized") is True:
+                lines.append("- **Policy Note:** `Deprioritized by core ineligible guidance unless chained to stronger impact.`")
             lines.append("")
 
         lines.append("## Safety Notes")

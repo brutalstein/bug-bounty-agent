@@ -1,4 +1,4 @@
-"""Local LLM client with Ollama-first and rule-based fallback behavior."""
+"""LLM client with OpenAI-first, Ollama-second, and rule-based fallback behavior."""
 
 from __future__ import annotations
 
@@ -9,9 +9,13 @@ import urllib.error
 import urllib.request
 
 
-OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "mistral:7b")
-LLM_TIMEOUT = 30
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
+OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5.4-mini").strip()
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434").rstrip("/")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen3:8b").strip()
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "auto").strip().lower()
+LLM_TIMEOUT = int(os.getenv("LLM_TIMEOUT_SECONDS", "120"))
 
 
 @dataclass
@@ -22,122 +26,190 @@ class LLMResponse:
     fallback_used: bool
 
 
-def is_ollama_available() -> bool:
-    request = urllib.request.Request(
-        f"{OLLAMA_BASE_URL.rstrip('/')}/api/tags",
-        method="GET",
-        headers={"Accept": "application/json"},
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=5) as response:
-            payload = json.loads(response.read().decode("utf-8", errors="ignore") or "{}")
-    except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, json.JSONDecodeError):
-        return False
+def is_openai_available() -> bool:
+    return bool(OPENAI_API_KEY)
 
-    for model in payload.get("models", []):
-        if not isinstance(model, dict):
-            continue
-        if str(model.get("name", "")).strip() == OLLAMA_MODEL:
-            return True
-    return False
+
+def is_ollama_available() -> bool:
+    return _resolved_ollama_model_name() is not None
+
+
+def current_llm_backend() -> str:
+    if LLM_PROVIDER == "openai" and is_openai_available():
+        return "openai"
+    if LLM_PROVIDER == "ollama" and is_ollama_available():
+        return "ollama"
+    if LLM_PROVIDER == "fallback":
+        return "fallback"
+    if is_openai_available():
+        return "openai"
+    if is_ollama_available():
+        return "ollama"
+    return "fallback"
 
 
 def analyze_signal(signal_json: dict) -> LLMResponse:
     fallback_payload = _fallback_signal_analysis(signal_json)
-    if not is_ollama_available():
-        return LLMResponse(
-            text=json.dumps(fallback_payload, ensure_ascii=False),
-            success=True,
-            model="rule-based-fallback",
-            fallback_used=True,
-        )
+    backend = current_llm_backend()
 
-    prompt = (
-        "You are a senior bug bounty hunter analyzing authorized scan signals. "
-        "Return only JSON with keys confidence, vuln_class, next_step, report_ready, rationale. "
-        "Be conservative and avoid false positives.\n\n"
-        f"Signal:\n{json.dumps(_compact_signal(signal_json), ensure_ascii=False)}"
-    )
-    response = _call_ollama(prompt)
-    if response is None:
-        return LLMResponse(
-            text=json.dumps(fallback_payload, ensure_ascii=False),
-            success=True,
-            model="rule-based-fallback",
-            fallback_used=True,
+    if backend == "openai":
+        prompt = (
+            "Return JSON only with keys: confidence, vuln_class, next_step, report_ready, rationale. "
+            "Be conservative.\n"
+            f"{json.dumps(_compact_signal(signal_json), ensure_ascii=False)}"
         )
+        response = _call_openai(prompt)
+        if response is not None:
+            parsed_text = _extract_json_object(response)
+            if parsed_text is not None:
+                return LLMResponse(
+                    text=parsed_text,
+                    success=True,
+                    model=OPENAI_MODEL,
+                    fallback_used=False,
+                )
 
-    parsed_text = _extract_json_object(response)
-    if parsed_text is None:
-        return LLMResponse(
-            text=json.dumps(fallback_payload, ensure_ascii=False),
-            success=True,
-            model="rule-based-fallback",
-            fallback_used=True,
+    if backend in {"openai", "ollama"}:
+        prompt = (
+            "Return JSON only with keys: confidence, vuln_class, next_step, report_ready, rationale. "
+            "Be conservative.\n"
+            f"{json.dumps(_compact_signal(signal_json), ensure_ascii=False)}"
         )
+        response = _call_ollama(prompt)
+        if response is not None:
+            parsed_text = _extract_json_object(response)
+            if parsed_text is not None:
+                return LLMResponse(
+                    text=parsed_text,
+                    success=True,
+                    model=_resolved_ollama_model_name(),
+                    fallback_used=False,
+                )
 
     return LLMResponse(
-        text=parsed_text,
+        text=json.dumps(fallback_payload, ensure_ascii=False),
         success=True,
-        model=OLLAMA_MODEL,
-        fallback_used=False,
+        model="rule-based-fallback",
+        fallback_used=True,
     )
 
 
 def generate_report_section(signal_json: dict, evidence: list) -> LLMResponse:
     fallback_payload = _fallback_report_section(signal_json, evidence)
-    if not is_ollama_available():
-        return LLMResponse(
-            text=json.dumps(fallback_payload, ensure_ascii=False),
-            success=True,
-            model="rule-based-fallback",
-            fallback_used=True,
-        )
+    backend = current_llm_backend()
 
-    prompt = (
-        "Generate one concise bug bounty draft section as JSON only. "
-        "Keys: title, severity, description, steps_to_reproduce, impact, remediation, limitations. "
-        "Stay conservative and mention human review when appropriate.\n\n"
-        f"Signal:\n{json.dumps(_compact_signal(signal_json), ensure_ascii=False)}\n\n"
-        f"Evidence:\n{json.dumps(evidence[:8], ensure_ascii=False)}"
-    )
-    response = _call_ollama(prompt)
-    if response is None:
-        return LLMResponse(
-            text=json.dumps(fallback_payload, ensure_ascii=False),
-            success=True,
-            model="rule-based-fallback",
-            fallback_used=True,
+    if backend == "openai":
+        prompt = (
+            "Return JSON only with keys: title, severity, description, steps_to_reproduce, impact, remediation, limitations. "
+            "Stay conservative.\n"
+            f"signal={json.dumps(_compact_signal(signal_json), ensure_ascii=False)}\n"
+            f"evidence={json.dumps(evidence[:5], ensure_ascii=False)}"
         )
+        response = _call_openai(prompt)
+        if response is not None:
+            parsed_text = _extract_json_object(response)
+            if parsed_text is not None:
+                return LLMResponse(
+                    text=parsed_text,
+                    success=True,
+                    model=OPENAI_MODEL,
+                    fallback_used=False,
+                )
 
-    parsed_text = _extract_json_object(response)
-    if parsed_text is None:
-        return LLMResponse(
-            text=json.dumps(fallback_payload, ensure_ascii=False),
-            success=True,
-            model="rule-based-fallback",
-            fallback_used=True,
+    if backend in {"openai", "ollama"}:
+        prompt = (
+            "Return JSON only with keys: title, severity, description, steps_to_reproduce, impact, remediation, limitations. "
+            "Stay conservative.\n"
+            f"signal={json.dumps(_compact_signal(signal_json), ensure_ascii=False)}\n"
+            f"evidence={json.dumps(evidence[:5], ensure_ascii=False)}"
         )
+        response = _call_ollama(prompt)
+        if response is not None:
+            parsed_text = _extract_json_object(response)
+            if parsed_text is not None:
+                return LLMResponse(
+                    text=parsed_text,
+                    success=True,
+                    model=_resolved_ollama_model_name(),
+                    fallback_used=False,
+                )
 
     return LLMResponse(
-        text=parsed_text,
+        text=json.dumps(fallback_payload, ensure_ascii=False),
         success=True,
-        model=OLLAMA_MODEL,
-        fallback_used=False,
+        model="rule-based-fallback",
+        fallback_used=True,
     )
 
 
-def _call_ollama(prompt: str) -> str | None:
+def _call_openai(prompt: str) -> str | None:
+    if not is_openai_available():
+        return None
+
     body = json.dumps(
         {
-            "model": OLLAMA_MODEL,
-            "prompt": prompt,
-            "stream": False,
-            "format": "json",
+            "model": OPENAI_MODEL,
+            "input": prompt,
+            "reasoning": {"effort": "low"},
         }
     ).encode("utf-8")
     request = urllib.request.Request(
-        f"{OLLAMA_BASE_URL.rstrip('/')}/api/generate",
+        f"{OPENAI_BASE_URL}/responses",
+        data=body,
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {OPENAI_API_KEY}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=LLM_TIMEOUT) as response:
+            payload = json.loads(response.read().decode("utf-8", errors="ignore") or "{}")
+    except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, json.JSONDecodeError):
+        return None
+
+    output_text = str(payload.get("output_text", "")).strip()
+    if output_text:
+        return output_text
+
+    output = payload.get("output", [])
+    if isinstance(output, list):
+        chunks: list[str] = []
+        for item in output:
+            if not isinstance(item, dict):
+                continue
+            for content in item.get("content", []):
+                if not isinstance(content, dict):
+                    continue
+                text_value = str(content.get("text", "")).strip()
+                if text_value:
+                    chunks.append(text_value)
+        if chunks:
+            return "\n".join(chunks)
+
+    return None
+
+
+def _call_ollama(prompt: str) -> str | None:
+    model_name = _resolved_ollama_model_name()
+    if not model_name:
+        return None
+
+    body = json.dumps(
+        {
+            "model": model_name,
+            "prompt": prompt,
+            "stream": False,
+            "think": False,
+            "options": {
+                "temperature": 0.1,
+                "num_predict": 220,
+            },
+        }
+    ).encode("utf-8")
+    request = urllib.request.Request(
+        f"{OLLAMA_BASE_URL}/api/generate",
         data=body,
         method="POST",
         headers={
@@ -152,6 +224,45 @@ def _call_ollama(prompt: str) -> str | None:
         return None
 
     return str(payload.get("response", "")).strip() or None
+
+
+def _fetch_ollama_tags() -> list[dict] | None:
+    request = urllib.request.Request(
+        f"{OLLAMA_BASE_URL}/api/tags",
+        method="GET",
+        headers={"Accept": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=5) as response:
+            payload = json.loads(response.read().decode("utf-8", errors="ignore") or "{}")
+    except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, json.JSONDecodeError):
+        return None
+
+    models = payload.get("models", [])
+    return models if isinstance(models, list) else None
+
+
+def _resolved_ollama_model_name() -> str | None:
+    tags = _fetch_ollama_tags()
+    if tags is None:
+        return None
+
+    requested_model = OLLAMA_MODEL.strip().lower()
+    for model in tags:
+        if not isinstance(model, dict):
+            continue
+        name = str(model.get("name", "")).strip()
+        if name.lower() == requested_model:
+            return name
+
+    for model in tags:
+        if not isinstance(model, dict):
+            continue
+        name = str(model.get("name", "")).strip()
+        if name:
+            return name
+
+    return None
 
 
 def _extract_json_object(text: str) -> str | None:

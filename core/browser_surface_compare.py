@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlparse
 import json
 import re
 
@@ -42,6 +43,9 @@ class BrowserSurfaceSnapshot:
     local_storage_key_count: int
     session_storage_key_count: int
     auth_storage_key_count: int
+    cookie_domains: list[str]
+    auth_cookie_names: list[str]
+    auth_cookie_domains: list[str]
     cookies: list[dict]
     local_storage_keys: list[str]
     session_storage_keys: list[str]
@@ -170,6 +174,19 @@ class BrowserSurfaceCompareRunner:
                         )
                         for item in context.cookies()
                     ]
+                    auth_cookie_names = [
+                        item.name
+                        for item in cookies
+                        if AUTH_LIKE_PATTERN.search(item.name or "")
+                    ]
+                    cookie_domains = sorted({item.domain for item in cookies if item.domain})
+                    auth_cookie_domains = sorted(
+                        {
+                            item.domain
+                            for item in cookies
+                            if item.domain and AUTH_LIKE_PATTERN.search(item.name or "")
+                        }
+                    )
                     local_storage_keys = page.evaluate("() => Object.keys(window.localStorage || {})")
                     session_storage_keys = page.evaluate("() => Object.keys(window.sessionStorage || {})")
                     notes = []
@@ -191,6 +208,9 @@ class BrowserSurfaceCompareRunner:
                                 for key in [*local_storage_keys, *session_storage_keys]
                                 if AUTH_LIKE_STORAGE_PATTERN.search(str(key))
                             ),
+                            cookie_domains=cookie_domains,
+                            auth_cookie_names=auth_cookie_names,
+                            auth_cookie_domains=auth_cookie_domains,
                             cookies=[item.to_dict() for item in cookies],
                             local_storage_keys=[str(item) for item in local_storage_keys],
                             session_storage_keys=[str(item) for item in session_storage_keys],
@@ -209,6 +229,9 @@ class BrowserSurfaceCompareRunner:
                             local_storage_key_count=0,
                             session_storage_key_count=0,
                             auth_storage_key_count=0,
+                            cookie_domains=[],
+                            auth_cookie_names=[],
+                            auth_cookie_domains=[],
                             cookies=[],
                             local_storage_keys=[],
                             session_storage_keys=[],
@@ -253,6 +276,38 @@ class BrowserSurfaceCompareRunner:
                             "Compare this browser state against the login page and a second public page.",
                             "Review whether these cookies are anonymous bootstrap state or a stronger session construct.",
                             "Do not attempt active cookie tampering without explicit policy allowance.",
+                        ],
+                    )
+                )
+
+            requested_host = urlparse(snapshot.requested_target).hostname or ""
+            final_host = urlparse(snapshot.final_url).hostname or ""
+            if (
+                requested_host
+                and final_host
+                and requested_host != final_host
+                and snapshot.auth_cookie_domains
+            ):
+                hypotheses.append(
+                    BrowserSurfaceHypothesis(
+                        hypothesis_id=f"BSC-{len(hypotheses)+1}",
+                        severity="medium",
+                        title="Cross-host redirect also establishes auth-like cookie provenance",
+                        rationale=(
+                            f"Anonymous browser navigation started on `{requested_host}`, ended on `{final_host}`, "
+                            f"and observed auth-like cookie domains `{snapshot.auth_cookie_domains}`."
+                        ),
+                        affected_surfaces=[snapshot.final_url],
+                        supporting_signals=[
+                            f"requested_host={requested_host}",
+                            f"final_host={final_host}",
+                            f"auth_cookie_domains={snapshot.auth_cookie_domains}",
+                            f"auth_cookie_names={snapshot.auth_cookie_names}",
+                        ],
+                        safe_next_steps=[
+                            "Compare redirect and cookie provenance with HTTP-only surface recon artifacts.",
+                            "Review whether host transitions and cookie scope align with intended anonymous bootstrap behavior.",
+                            "Do not tamper with cookies or force host rewrites.",
                         ],
                     )
                 )
@@ -343,6 +398,8 @@ class BrowserSurfaceCompareRunner:
             lines.append(f"- **Local Storage Keys:** `{item.get('local_storage_key_count', 0)}`")
             lines.append(f"- **Session Storage Keys:** `{item.get('session_storage_key_count', 0)}`")
             lines.append(f"- **Auth-Like Storage Keys:** `{item.get('auth_storage_key_count', 0)}`")
+            lines.append(f"- **Cookie Domains:** `{item.get('cookie_domains', [])}`")
+            lines.append(f"- **Auth Cookie Domains:** `{item.get('auth_cookie_domains', [])}`")
             lines.append(f"- **Notes:** `{item.get('notes', [])}`")
             lines.append("")
         lines.append("## Hypotheses")

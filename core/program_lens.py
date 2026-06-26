@@ -20,6 +20,7 @@ class ProgramLensSummary:
     core_ineligible_findings: list[str]
     focus_areas: list[dict]
     operator_recipes: list[dict]
+    signal_lanes: list[dict]
     json_path: str
     markdown_path: str
 
@@ -48,6 +49,7 @@ class ProgramLensBuilder:
             core_ineligible_findings=list(policy.core_ineligible_findings),
             focus_areas=[self._expand_dict(item) for item in policy.focus_areas],
             operator_recipes=[self._expand_dict(item) for item in policy.operator_recipes],
+            signal_lanes=self._build_signal_lanes(),
             json_path=str(self.output_json_path),
             markdown_path=str(self.output_markdown_path),
         )
@@ -116,6 +118,7 @@ class ProgramLensBuilder:
         lines.append(f"- **Priority Categories:** `{len(summary.priority_categories)}`")
         lines.append(f"- **Deprioritized Categories:** `{len(summary.deprioritized_categories)}`")
         lines.append(f"- **Core Ineligible Reminders:** `{len(summary.core_ineligible_findings)}`")
+        lines.append(f"- **Signal Lanes:** `{len(summary.signal_lanes)}`")
         lines.append("")
         lines.append("## Priority Categories")
         lines.append("")
@@ -167,6 +170,29 @@ class ProgramLensBuilder:
         else:
             lines.append("No focus areas configured.")
             lines.append("")
+        lines.append("## Inferred Signal Lanes")
+        lines.append("")
+        lines.append("> These lanes are agent inferences from the current profile and the observed policy shape. They reflect signal strength, not payout.")
+        lines.append("")
+        if summary.signal_lanes:
+            for lane in summary.signal_lanes:
+                lines.append(f"### {lane.get('title', lane.get('id', 'lane'))}")
+                lines.append("")
+                if lane.get("goal"):
+                    lines.append(f"- **Goal:** {lane.get('goal')}")
+                if lane.get("signal_types"):
+                    lines.append(f"- **Signals:** `{lane.get('signal_types')}`")
+                if lane.get("triage_categories"):
+                    lines.append(f"- **Triage Categories:** `{lane.get('triage_categories')}`")
+                notes = lane.get("notes", [])
+                if notes:
+                    lines.append("- **Notes:**")
+                    for note in notes:
+                        lines.append(f"  - {note}")
+                lines.append("")
+        else:
+            lines.append("No signal lanes inferred.")
+            lines.append("")
         lines.append("## Operator Recipes")
         lines.append("")
         if summary.operator_recipes:
@@ -195,3 +221,87 @@ class ProgramLensBuilder:
         lines.append("- Keep real-program work read-only unless the profile and policy explicitly allow more.")
         lines.append("")
         return "\n".join(lines)
+
+    def _build_signal_lanes(self) -> list[dict]:
+        ineligible = {
+            str(item).strip().lower()
+            for item in self.scope.config.policy.core_ineligible_findings
+        }
+        focus_keywords = sorted(
+            {
+                str(keyword).strip()
+                for area in self.scope.config.policy.focus_areas
+                if isinstance(area, dict)
+                for keyword in area.get("path_keywords", [])
+                if str(keyword).strip()
+            }
+        )
+
+        return [
+            {
+                "id": "critical-value",
+                "title": "Strongest Signal Lane",
+                "goal": "Push access-control, sensitive-data, and privileged-route boundary signals to the top because they are the strongest current vulnerability leads.",
+                "signal_types": [
+                    "AUTH_BYPASS",
+                    "IDOR",
+                    "SENSITIVE_DATA",
+                    "BROKEN_ACCESS_CONTROL",
+                    "ADMIN_EXPOSURE",
+                ],
+                "triage_categories": [
+                    "potential_auth_bypass",
+                    "potential_unauthenticated_admin_access",
+                    "potential_unauthenticated_api_data_exposure",
+                    "potential_sensitive_exposure",
+                    "idor_candidate",
+                    "authenticated_access_boundary_review",
+                    "authenticated_sensitive_response_review",
+                ],
+                "notes": [
+                    "Best fit for API, auth, session, record, base, workspace, and internal-looking routes.",
+                    "Keep any later validation limited to your own staging account and self-owned test data.",
+                ],
+            },
+            {
+                "id": "medium-value",
+                "title": "Developing Signal Lane",
+                "goal": "Use safe recon to mature schema, auth-surface, and session-drift hints into stronger access-control hypotheses.",
+                "signal_types": [
+                    "JWT_ISSUES",
+                    "SSRF_CANDIDATE",
+                    "INFO_DISCLOSURE",
+                ],
+                "triage_categories": [
+                    "validated_authentication_surface",
+                    "validated_api_surface",
+                    "public_api_schema_review",
+                    "graphql_surface_review",
+                    "cross_surface_session_bootstrap_review",
+                    "browser_storage_policy_review",
+                ],
+                "notes": [
+                    "These usually need correlation with stronger data or access evidence before they are worth reporting.",
+                    f"Current focus keywords: {focus_keywords[:12]}",
+                ],
+            },
+            {
+                "id": "low-value-noise",
+                "title": "Weak Signal / Noise Lane",
+                "goal": "Suppress common low-signal issues unless they chain into a stronger boundary or data-impact story.",
+                "signal_types": [
+                    "CORS_MISCONFIG",
+                    "OPEN_REDIRECT",
+                ],
+                "triage_categories": [
+                    "cookie_attribute_policy_review",
+                    "session_cookie_policy_review",
+                    "public_route_inventory_review",
+                    "reachable_api_mapping",
+                ],
+                "notes": [
+                    "This lane is heavily shaped by HackerOne core ineligible guidance.",
+                    f"Configured ineligible reminders: {sorted(ineligible)}",
+                ],
+            },
+        ]
