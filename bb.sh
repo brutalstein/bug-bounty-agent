@@ -53,6 +53,15 @@ say_step() {
   printf "%s %s %s\n" "$(color "1;38;5;213" "$icon_step")" "$(color "1;38;5;213" "STEP")" "$*"
 }
 
+run_setup_wizard() {
+  say_step "Running autonomous setup"
+  (
+    cd "$ROOT_DIR"
+    "$PYTHON_BIN" app/setup_wizard.py
+  )
+  say_ok "Setup sync completed"
+}
+
 ensure_env_file() {
   if [[ ! -f "$ENV_FILE" ]]; then
     say_fail "Missing required .env file: $ENV_FILE"
@@ -144,11 +153,19 @@ show_help_hint() {
   cat <<'EOF'
 
 Examples:
+  ./bb.sh setup
+  ./bb.sh
+  ./bb.sh interactive
   ./bb.sh doctor
   ./bb.sh profiles
+  ./bb.sh onboard --program demo-program --policy-url https://example.com/policy --base-url https://target.example.com
   ./bb.sh config --profile owasp-juice-shop-local
   ./bb.sh lab-up --profile owasp-juice-shop-local
   ./bb.sh quick-scan --profile owasp-juice-shop-local http://localhost:3000
+  ./bb.sh hunt --profile owasp-juice-shop-local http://localhost:3000
+  ./bb.sh signals-run runs/<run-id>
+  ./bb.sh deep-hunt runs/<run-id>
+  ./bb.sh last-run
   ./bb.sh authenticated-crawl --profile owasp-juice-shop-local http://localhost:3000 --manual-approval
   ./bb.sh session-compare-run runs/<run-id> --manual-approval
 
@@ -160,8 +177,17 @@ EOF
 }
 
 main() {
+  local setup_requested=0
+  if [[ "${1:-}" == "setup" ]]; then
+    setup_requested=1
+    shift || true
+  fi
+
   say_banner
   ensure_python
+  if [[ ! -f "$ENV_FILE" || "$setup_requested" -eq 1 ]]; then
+    run_setup_wizard
+  fi
   ensure_env_file
   load_env_file
   ensure_venv
@@ -169,15 +195,20 @@ main() {
   install_requirements_if_needed
   ensure_browser_runtime
 
+  if [[ "$setup_requested" -eq 1 && "$#" -eq 0 ]]; then
+    say_info "Setup finished. Running doctor for verification."
+    run_cli doctor
+    return $?
+  fi
+
   if [[ "${1:-}" == "--bootstrap-only" ]]; then
     say_ok "Bootstrap completed."
     return 0
   fi
 
   if [[ "$#" -eq 0 ]]; then
-    say_info "Environment is ready."
-    show_help_hint
-    run_cli doctor
+    say_info "Environment is ready. Launching the autonomous agent."
+    run_cli interactive
     return 0
   fi
 

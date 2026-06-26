@@ -43,6 +43,8 @@ class ArtifactIndexBuilder:
         auth_session = self._read_json(self.parsed_dir / "auth_session.json")
         authenticated_crawl = self._read_json(self.parsed_dir / "authenticated_crawl_summary.json")
         session_compare = self._read_json(self.parsed_dir / "session_compare.json")
+        signals = self._read_json(self.parsed_dir / "signals.json")
+        deep_hunt = self._read_json(self.parsed_dir / "deep_hunt.json")
         review_queue = self._read_json(self.parsed_dir / "review_queue.json")
         browser_evidence = self._read_json(self.parsed_dir / "browser_evidence.json")
         evidence_pack = self._read_json(self.evidence_dir / "evidence_pack.json")
@@ -68,6 +70,9 @@ class ArtifactIndexBuilder:
                 self.reports_dir / "browser_evidence.md",
                 self.reports_dir / "authenticated_crawl.md",
                 self.reports_dir / "session_compare.md",
+                self.reports_dir / "signals.md",
+                self.reports_dir / "deep_hunt.md",
+                self.reports_dir / "agent_summary.md",
                 self.reports_dir / "evidence_pack.md",
                 self.reports_dir / "final_report_draft.md",
                 self.reports_dir / "report_draft.md",
@@ -95,6 +100,9 @@ class ArtifactIndexBuilder:
                 self.parsed_dir / "authenticated_crawl_result.json",
                 self.parsed_dir / "authenticated_crawl_summary.json",
                 self.parsed_dir / "session_compare.json",
+                self.parsed_dir / "signals.json",
+                self.parsed_dir / "deep_hunt.json",
+                self.parsed_dir / "agent_summary.json",
                 self.parsed_dir / "browser_evidence.json",
                 self.parsed_dir / "normalized_findings.json",
                 self.parsed_dir / "js_analysis.json",
@@ -133,6 +141,8 @@ class ArtifactIndexBuilder:
             auth_session=auth_session,
             authenticated_crawl=authenticated_crawl,
             session_compare=session_compare,
+            signals=signals,
+            deep_hunt=deep_hunt,
             review_queue=review_queue,
             evidence_pack=evidence_pack,
             browser_evidence=browser_evidence,
@@ -159,6 +169,8 @@ class ArtifactIndexBuilder:
         auth_session: dict,
         authenticated_crawl: dict,
         session_compare: dict,
+        signals: dict,
+        deep_hunt: dict,
         review_queue: dict,
         evidence_pack: dict,
         browser_evidence: dict,
@@ -216,6 +228,17 @@ class ArtifactIndexBuilder:
         if auth_session:
             lines.append(f"- **Authenticated Session Profile:** `{auth_session.get('session_profile_name', '')}`")
             lines.append(f"- **Authenticated Session Role:** `{auth_session.get('derived_role') or auth_session.get('role_hint', '')}`")
+        if signals:
+            lines.append(f"- **Signals Detected:** `{signals.get('total_signals', 0)}`")
+            lines.append(f"- **Critical Signals:** `{signals.get('critical_count', 0)}`")
+            lines.append(f"- **High Signals:** `{signals.get('high_count', 0)}`")
+        if deep_hunt:
+            lines.append(f"- **Deep Hunt Investigated:** `{deep_hunt.get('investigated_count', 0)}`")
+        lines.append(f"- **Deep Hunt Escalated:** `{deep_hunt.get('escalated_count', 0)}`")
+        agent_summary = self._read_json(self.parsed_dir / "agent_summary.json")
+        if agent_summary:
+            lines.append(f"- **Autonomous Agent Cycles:** `{agent_summary.get('cycle_count', 0)}`")
+            lines.append(f"- **Autonomous Agent Stop Reason:** `{agent_summary.get('stop_reason', '')}`")
         lines.append("")
         lines.append("## High-Level Counts")
         lines.append("")
@@ -234,6 +257,7 @@ class ArtifactIndexBuilder:
         lines.append(f"- **Browser Evidence Failed:** `{browser_evidence.get('failed_count', 0)}`")
         lines.append(f"- **Evidence Pack Items:** `{evidence_pack.get('total_items', 0)}`")
         lines.append(f"- **Final Report Draft Items:** `{final_report.get('report_draft_items', 0)}`")
+        lines.append(f"- **Deep Hunt Ruled Out:** `{deep_hunt.get('ruled_out_count', 0)}`")
         lines.append("")
         lines.append("## Report Artifacts")
         lines.append("")
@@ -249,6 +273,9 @@ class ArtifactIndexBuilder:
         lines.append(f"- `reports/browser_evidence.md` {'(present)' if (self.reports_dir / 'browser_evidence.md').exists() else '(missing)' }")
         lines.append(f"- `reports/authenticated_crawl.md` {'(present)' if (self.reports_dir / 'authenticated_crawl.md').exists() else '(missing)' }")
         lines.append(f"- `reports/session_compare.md` {'(present)' if (self.reports_dir / 'session_compare.md').exists() else '(missing)' }")
+        lines.append(f"- `reports/signals.md` {'(present)' if (self.reports_dir / 'signals.md').exists() else '(missing)' }")
+        lines.append(f"- `reports/deep_hunt.md` {'(present)' if (self.reports_dir / 'deep_hunt.md').exists() else '(missing)' }")
+        lines.append(f"- `reports/agent_summary.md` {'(present)' if (self.reports_dir / 'agent_summary.md').exists() else '(missing)' }")
         lines.append(f"- `reports/evidence_pack.md` {'(present)' if (self.reports_dir / 'evidence_pack.md').exists() else '(missing)' }")
         lines.append(f"- `reports/final_report_draft.md` {'(present)' if (self.reports_dir / 'final_report_draft.md').exists() else '(missing)' }")
         lines.append(f"- `reports/report_draft.md` {'(present)' if report_draft_exists else '(missing)' }")

@@ -51,7 +51,7 @@ class ProfileReadinessAssessor:
                 ReadinessIssue(
                     severity="blocker",
                     code="missing_env_file",
-                    message="Required `.env` file is missing. Create it from `.env.example` before using the CLI.",
+                    message="Required `.env` file is missing. Run `./bb.sh setup` to create it safely before using the CLI.",
                 )
             )
         else:
@@ -209,14 +209,14 @@ class ProfileReadinessAssessor:
         for item in self.scope.list_session_profiles():
             token_env = str(item.get("token_env", "")).strip()
             if token_env and not str(os.getenv(token_env, "")).strip():
-                blockers.append(
+                warnings.append(
                     ReadinessIssue(
-                        severity="blocker",
+                        severity="warning",
                         code=f"session_env_missing:{item['name']}",
                         message=(
                             f"Session profile `{item['name']}` expects token material in `{token_env}`, "
                             "but that environment variable is not currently set. "
-                            "Populate it in `.env` before authenticated program testing."
+                            "Anonymous and passive checks can still run, but populate it in `.env` before authenticated program testing."
                         ),
                     )
                 )

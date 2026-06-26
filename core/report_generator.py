@@ -32,6 +32,8 @@ class ReportGenerator:
         endpoint_validation = self._read_json(self.parsed_dir / "endpoint_validation.json")
         validation_plan = self._read_json(self.parsed_dir / "validation_plan.json")
         ranked_candidates = self._read_json(self.parsed_dir / "ranked_candidates.json")
+        signals = self._read_json(self.parsed_dir / "signals.json")
+        deep_hunt = self._read_json(self.parsed_dir / "deep_hunt.json")
 
         if not isinstance(findings, list):
             findings = []
@@ -72,6 +74,12 @@ class ReportGenerator:
         if not isinstance(ranked_candidates, dict):
             ranked_candidates = {}
 
+        if not isinstance(signals, dict):
+            signals = {}
+
+        if not isinstance(deep_hunt, dict):
+            deep_hunt = {}
+
         markdown = self._build_markdown(
             run_data=run_data,
             scope_data=scope_data,
@@ -89,6 +97,8 @@ class ReportGenerator:
             endpoint_validation=endpoint_validation,
             validation_plan=validation_plan,
             ranked_candidates=ranked_candidates,
+            signals=signals,
+            deep_hunt=deep_hunt,
         )
 
         self.report_path.write_text(markdown, encoding="utf-8")
@@ -113,6 +123,8 @@ class ReportGenerator:
         endpoint_validation: dict,
         validation_plan: dict,
         ranked_candidates: dict,
+        signals: dict,
+        deep_hunt: dict,
     ) -> str:
         target_url = run_data.get("target_url") or scope_data.get("normalized_url") or "unknown"
         target_name = run_data.get("target_name", "unknown")
@@ -142,6 +154,8 @@ class ReportGenerator:
 
         ranked_items = ranked_candidates.get("ranked_candidates", []) if isinstance(ranked_candidates, dict) else []
         ranked_bucket_counter = Counter(item.get("final_bucket", "unknown") for item in ranked_items)
+        signal_items = signals.get("signals", []) if isinstance(signals, dict) else []
+        signal_priority_counter = Counter(item.get("priority", "unknown") for item in signal_items if isinstance(item, dict))
 
         reportable_findings = [
             finding
@@ -381,6 +395,63 @@ class ReportGenerator:
                 lines.append("- No authenticated endpoint diffs were recorded.")
         else:
             lines.append("No passive surface comparison data was generated.")
+
+        lines.append("")
+        lines.append("## Vulnerability Signal Summary")
+        lines.append("")
+
+        if signals:
+            lines.append(f"- **Signals Detected:** `{signals.get('total_signals', 0)}`")
+            lines.append(f"- **Critical Signals:** `{signals.get('critical_count', 0)}`")
+            lines.append(f"- **High Signals:** `{signals.get('high_count', 0)}`")
+            lines.append(f"- **Medium Signals:** `{signals.get('medium_count', 0)}`")
+            lines.append(f"- **Low Signals:** `{signals.get('low_count', 0)}`")
+            if signal_priority_counter:
+                lines.append("")
+                lines.append("### Signal Priority Counts")
+                lines.append("")
+                for priority, count in signal_priority_counter.most_common():
+                    lines.append(f"- **{priority}:** `{count}`")
+            lines.append("")
+            lines.append("### Top Signals")
+            lines.append("")
+            if signal_items:
+                for item in signal_items[:6]:
+                    if not isinstance(item, dict):
+                        continue
+                    lines.append(
+                        f"- **{item.get('signal_type', 'unknown')}:** {item.get('endpoint', 'unknown')} "
+                        f"(priority={item.get('priority', 'unknown')}, confidence={item.get('confidence', 0)})"
+                    )
+            else:
+                lines.append("- No signals were recorded.")
+        else:
+            lines.append("No signal detection data was generated.")
+
+        lines.append("")
+        lines.append("## Deep Hunt Summary")
+        lines.append("")
+
+        if deep_hunt:
+            lines.append(f"- **Investigated Signals:** `{deep_hunt.get('investigated_count', 0)}`")
+            lines.append(f"- **Escalated Signals:** `{deep_hunt.get('escalated_count', 0)}`")
+            lines.append(f"- **Ruled Out Signals:** `{deep_hunt.get('ruled_out_count', 0)}`")
+            lines.append(f"- **Read-Only Requests Used:** `{deep_hunt.get('total_request_count', 0)}`")
+            lines.append("")
+            lines.append("### Deep Hunt Outcomes")
+            lines.append("")
+            if isinstance(deep_hunt.get("signals"), list) and deep_hunt.get("signals"):
+                for item in deep_hunt.get("signals", [])[:6]:
+                    if not isinstance(item, dict):
+                        continue
+                    lines.append(
+                        f"- **{item.get('signal_type', 'unknown')}:** {item.get('endpoint', 'unknown')} "
+                        f"-> status={item.get('status', 'unknown')}, confidence={item.get('confidence', 0)}"
+                    )
+            else:
+                lines.append("- No deep-hunt outcomes were recorded.")
+        else:
+            lines.append("No deep-hunt data was generated.")
 
         lines.append("")
         lines.append("## Endpoint Validation Summary")

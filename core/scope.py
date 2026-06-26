@@ -113,7 +113,42 @@ class ScopeManager:
             raise FileNotFoundError(f"Scope config not found: {self.config_path}")
 
         with self.config_path.open("r", encoding="utf-8") as file:
-            return yaml.safe_load(file) or {}
+            raw_config = yaml.safe_load(file) or {}
+
+        if not isinstance(raw_config, dict):
+            raise ValueError("Scope config must contain a YAML object at the top level.")
+
+        return self._merge_external_profiles(raw_config)
+
+    def _merge_external_profiles(self, raw_config: dict) -> dict:
+        profiles_dir = self.config_path.parent / "profiles"
+        if not profiles_dir.exists() or not profiles_dir.is_dir():
+            return raw_config
+
+        merged_profiles = dict(raw_config.get("profiles", {}) or {})
+
+        for path in sorted(profiles_dir.glob("*.y*ml")):
+            with path.open("r", encoding="utf-8") as file:
+                external_data = yaml.safe_load(file) or {}
+
+            if not isinstance(external_data, dict):
+                continue
+
+            if isinstance(external_data.get("profiles"), dict):
+                for profile_name, profile_config in external_data["profiles"].items():
+                    merged_profiles[str(profile_name)] = profile_config or {}
+                continue
+
+            target_profile = external_data.get("target_profile", {})
+            profile_name = str(target_profile.get("name", path.stem)).strip() or path.stem
+            merged_profiles[profile_name] = external_data
+
+        if not merged_profiles:
+            return raw_config
+
+        merged_config = dict(raw_config)
+        merged_config["profiles"] = merged_profiles
+        return merged_config
 
     def get_active_profile_name(self) -> str:
         active_profile = str(self.raw_config.get("active_profile", "")).strip()

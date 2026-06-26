@@ -36,9 +36,15 @@ runs/
 ```bash
 cd ~/bug-bounty-agent
 
-cp .env.example .env
-# populate .env with your authorized secrets before continuing
+./bb.sh
+```
 
+With no arguments, `bb.sh` now bootstraps the environment, selects the best ready authorized profile, runs a bounded autonomous safe investigation flow, and leaves the latest dashboard path in the terminal.
+
+Common direct commands:
+
+```bash
+./bb.sh setup
 ./bb.sh doctor
 ./bb.sh profiles
 ./bb.sh config --profile owasp-juice-shop-local
@@ -51,9 +57,20 @@ Or bootstrap only:
 ./bb.sh --bootstrap-only
 ```
 
+`./bb.sh setup` creates or repairs `.env` automatically, preserves existing secrets, and leaves only real-program API keys for manual entry when you actually need authenticated testing.
+
 ## Real Program Preparation
 
-Use local copies of official policy documents first:
+One-command onboarding from an official policy URL:
+
+```bash
+./bb.sh onboard \
+  --program example-program \
+  --policy-url https://bugbounty.example.com/policy \
+  --base-url https://target.example.com
+```
+
+Or use local copies of official policy documents first:
 
 ```bash
 python app/main.py policy-fetch https://about.gitlab.com/security/disclosure/ --slug gitlab-disclosure
@@ -83,6 +100,7 @@ python app/main.py profile-readiness --profile owasp-juice-shop-local --target h
 ## Notes
 
 - `.env` is required and loaded automatically by both `./bb.sh` and `python app/main.py`.
+- `configs/profiles/*.yaml` is loaded automatically, so generated onboarding profiles can be added without editing the main `configs/scope.yaml`.
 - `runs/` contains local execution artifacts and is intentionally ignored from Git.
 - Nmap and other higher-risk tooling remain postponed until policy parsing, onboarding, and manual approval gates are fully mature.
 - If a profile does not explicitly set `allow_port_scan: true`, `nmap-scan` fails safely.

@@ -23,12 +23,14 @@ class EndpointValidationResult:
     content_type: str | None
     server: str | None
     response_time_seconds: float
+    response_bytes: int
     accessible: bool
     auth_likely_required: bool
     redirect_likely: bool
     interesting: bool
     exposure_likely: bool
     sensitive_indicators: list[str]
+    observed_headers: dict[str, str]
     risk_hint: str
     response_sample: str
     error: str | None
@@ -314,12 +316,14 @@ class EndpointValidator:
             content_type=response.content_type,
             server=response.server,
             response_time_seconds=response.response_time_seconds,
+            response_bytes=len(body),
             accessible=accessible,
             auth_likely_required=auth_likely_required,
             redirect_likely=redirect_likely,
             interesting=interesting,
             exposure_likely=exposure_likely,
             sensitive_indicators=sensitive_indicators,
+            observed_headers=self._interesting_headers(response.headers),
             risk_hint=risk_hint,
             response_sample=redacted_sample,
             error=response.error,
@@ -578,6 +582,21 @@ class EndpointValidator:
             return "Endpoint request failed or timed out."
 
         return "Endpoint validated as recon evidence."
+
+    def _interesting_headers(self, headers: dict[str, str]) -> dict[str, str]:
+        keys = [
+            "access-control-allow-origin",
+            "access-control-allow-credentials",
+            "cache-control",
+            "vary",
+            "content-security-policy",
+            "location",
+        ]
+        return {
+            key: str(headers.get(key, "")).strip()
+            for key in keys
+            if str(headers.get(key, "")).strip()
+        }
 
     def _sample_body(self, body: str, limit: int = 1200) -> str:
         if not body:

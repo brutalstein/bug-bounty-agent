@@ -4,8 +4,10 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from urllib.parse import urlparse
 
 from core.artifact_index import ArtifactIndexBuilder
+from core.autonomous_agent import AutonomousAgent
 from core.auth_session import AuthenticatedSessionManager
 from core.authenticated_crawl import AuthenticatedCrawlRunner
 from core.browser_evidence import BrowserEvidenceBuilder, check_browser_runtime
@@ -19,11 +21,13 @@ from core.preflight import PreflightChecker
 from core.program_lens import ProgramLensBuilder
 from core.profile_readiness import ProfileReadinessAssessor
 from core.program_onboarding import ProgramOnboardingBuilder
+from core.signal_detector import SignalDetector
 from core.scope import ScopeManager
 from core.run_context import create_run_context, RunContext
 from core.logger import create_run_logger
 from core.tool_inventory import ToolInventory, print_tool_report
 from core.findings import FindingNormalizer
+from core.deep_hunter import DeepHunter
 from core.triage import TriageEngine
 from core.js_analyzer import JSAnalyzer
 from core.endpoint_validator import EndpointValidator
@@ -78,6 +82,35 @@ def add_profile_argument(parser: argparse.ArgumentParser) -> None:
 
 def load_scope(profile_name: str | None = None) -> ScopeManager:
     return ScopeManager(str(PROJECT_ROOT / "configs" / "scope.yaml"), profile_name=profile_name)
+
+
+def derive_allowed_scope_inputs(
+    base_url: str,
+    allowed_hosts: list[str],
+    allowed_patterns: list[str],
+) -> tuple[list[str], list[str]]:
+    resolved_hosts = [item for item in allowed_hosts if str(item).strip()]
+    resolved_patterns = [item for item in allowed_patterns if str(item).strip()]
+    parsed = urlparse(base_url)
+
+    if not resolved_hosts and parsed.hostname:
+        resolved_hosts = [parsed.hostname]
+
+    if not resolved_patterns and parsed.scheme and parsed.netloc:
+        resolved_patterns = [f"{parsed.scheme}://{parsed.netloc}/*"]
+
+    return resolved_hosts, resolved_patterns
+
+
+def install_profile_stub(profile_name: str, profile_stub_path: str | Path) -> Path:
+    target_dir = PROJECT_ROOT / "configs" / "profiles"
+    target_dir.mkdir(parents=True, exist_ok=True)
+    output_path = target_dir / f"{profile_name}.yaml"
+    output_path.write_text(
+        Path(profile_stub_path).read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    return output_path
 
 
 def resolve_session_profile_name(scope: ScopeManager, requested_name: str | None) -> str:
@@ -170,6 +203,25 @@ def build_dashboard_safely(run_dir: str | Path) -> str | None:
     return summary.index_markdown_path
 
 
+def list_run_dirs() -> list[Path]:
+    runs_dir = PROJECT_ROOT / "runs"
+    if not runs_dir.exists():
+        return []
+    return sorted(
+        [path for path in runs_dir.iterdir() if path.is_dir()],
+        key=lambda item: item.stat().st_mtime,
+        reverse=True,
+    )
+
+
+def find_new_run_dir(existing: set[str]) -> Path | None:
+    current = list_run_dirs()
+    for path in current:
+        if str(path) not in existing:
+            return path
+    return current[0] if current else None
+
+
 def fail_run(
     ctx: RunContext,
     logger,
@@ -227,6 +279,7 @@ def command_doctor(_: argparse.Namespace) -> int:
         PROJECT_ROOT / "configs" / "scope.yaml",
         PROJECT_ROOT / "configs" / "tools.yaml",
         PROJECT_ROOT / "bb.sh",
+        PROJECT_ROOT / "app" / "setup_wizard.py",
         PROJECT_ROOT / "core" / "scope.py",
         PROJECT_ROOT / "core" / "run_context.py",
         PROJECT_ROOT / "core" / "logger.py",
@@ -244,6 +297,7 @@ def command_doctor(_: argparse.Namespace) -> int:
         PROJECT_ROOT / "core" / "high_value_recon.py",
         PROJECT_ROOT / "core" / "report_generator.py",
         PROJECT_ROOT / "core" / "artifact_index.py",
+        PROJECT_ROOT / "core" / "autonomous_agent.py",
         PROJECT_ROOT / "core" / "session_signals.py",
         PROJECT_ROOT / "core" / "session_surface_compare.py",
         PROJECT_ROOT / "core" / "auth_session.py",
@@ -260,6 +314,9 @@ def command_doctor(_: argparse.Namespace) -> int:
         PROJECT_ROOT / "core" / "preflight.py",
         PROJECT_ROOT / "core" / "profile_readiness.py",
         PROJECT_ROOT / "core" / "program_onboarding.py",
+        PROJECT_ROOT / "core" / "signal_detector.py",
+        PROJECT_ROOT / "core" / "deep_hunter.py",
+        PROJECT_ROOT / "core" / "llm_client.py",
         PROJECT_ROOT / "tools" / "tool_runner.py",
         PROJECT_ROOT / "tools" / "recon_tools.py",
         PROJECT_ROOT / "tools" / "crawl_tools.py",
@@ -516,16 +573,30 @@ def command_profile_readiness(args: argparse.Namespace) -> int:
 
 
 def command_program_onboard(args: argparse.Namespace) -> int:
+    allowed_hosts, allowed_patterns = derive_allowed_scope_inputs(
+        base_url=args.base_url,
+        allowed_hosts=args.allowed_host,
+        allowed_patterns=args.allowed_pattern,
+    )
+
+    if not allowed_hosts or not allowed_patterns:
+        print_fail("Program onboarding requires at least one allowed host and one allowed URL pattern.")
+        return 1
+
     builder = ProgramOnboardingBuilder(args.output_dir)
     summary = builder.build_bundle(
         policy_path=args.policy_path,
         profile_name=args.profile_name,
         base_url=args.base_url,
-        allowed_hosts=args.allowed_host,
-        allowed_url_patterns=args.allowed_pattern,
+        allowed_hosts=allowed_hosts,
+        allowed_url_patterns=allowed_patterns,
         blocked_path_prefixes=args.blocked_path_prefix,
         append_policy_paths=args.append_policy,
     )
+
+    installed_profile_path = None
+    if args.install_profile:
+        installed_profile_path = install_profile_stub(args.profile_name, summary.profile_stub_path)
 
     print_ok("Program onboarding bundle created.")
     print_info(f"Bundle directory: {summary.bundle_dir}")
@@ -534,7 +605,78 @@ def command_program_onboard(args: argparse.Namespace) -> int:
     print_info(f"Policy JSON: {summary.policy_json_path}")
     print_info(f"Profile stub: {summary.profile_stub_path}")
     print_info(f"Checklist: {summary.checklist_markdown_path}")
+    if installed_profile_path:
+        print_info(f"Installed profile: {installed_profile_path}")
+        print_info(f"Next step: `./bb.sh profiles` then `./bb.sh config --profile {summary.profile_name}`")
     print_info("This bundle is review-first. Keep authorization.confirmed=false until manual policy review is complete.")
+
+    return 0
+
+
+def command_onboard(args: argparse.Namespace) -> int:
+    allowed_hosts, allowed_patterns = derive_allowed_scope_inputs(
+        base_url=args.base_url,
+        allowed_hosts=args.allowed_host,
+        allowed_patterns=args.allowed_pattern,
+    )
+
+    if not allowed_hosts or not allowed_patterns:
+        print_fail("Onboard requires a base URL that can resolve to at least one allowed host and URL pattern.")
+        return 1
+
+    fetcher = PolicyFetcher(args.fetch_output_dir)
+    fetch_result = fetcher.fetch(args.policy_url, slug=args.fetch_slug or args.program)
+
+    builder = ProgramOnboardingBuilder(args.output_dir)
+    summary = builder.build_bundle(
+        policy_path=fetch_result.normalized_text_path,
+        profile_name=args.program,
+        base_url=args.base_url,
+        allowed_hosts=allowed_hosts,
+        allowed_url_patterns=allowed_patterns,
+        blocked_path_prefixes=args.blocked_path_prefix,
+        append_policy_paths=args.append_policy,
+    )
+
+    installed_profile_path = None
+    if args.install_profile:
+        installed_profile_path = install_profile_stub(args.program, summary.profile_stub_path)
+
+    print_ok("Policy fetched and onboarding bundle created.")
+    print_info(f"Policy URL: {args.policy_url}")
+    print_info(f"Fetched source: {fetch_result.raw_path}")
+    print_info(f"Normalized policy text: {fetch_result.normalized_text_path}")
+    print_info(f"Bundle directory: {summary.bundle_dir}")
+    print_info(f"Profile name: {summary.profile_name}")
+    print_info(f"Allowed hosts: {allowed_hosts}")
+    print_info(f"Allowed patterns: {allowed_patterns}")
+    if installed_profile_path:
+        print_info(f"Installed profile: {installed_profile_path}")
+        print_info(f"Next step: `./bb.sh config --profile {summary.profile_name}`")
+    print_info(
+        "Review-first reminder: the generated profile stays non-authorized until you manually verify the policy and set authorization.confirmed=true."
+    )
+    return 0
+
+
+def command_interactive(args: argparse.Namespace) -> int:
+    agent = AutonomousAgent(PROJECT_ROOT)
+    summary = agent.run(
+        preferred_profile=args.profile,
+        target=args.target,
+        max_cycles=args.max_cycles,
+    )
+
+    print_ok("Autonomous agent run completed.")
+    print_info(f"Selected profile: {summary.selected_profile}")
+    print_info(f"Selected target: {summary.selected_target}")
+    print_info(f"Cycle count: {summary.cycle_count}")
+    print_info(f"Stop reason: {summary.stop_reason}")
+
+    if summary.run_evaluations:
+        last = summary.run_evaluations[-1]
+        print_info(f"Latest run directory: {last['run_dir']}")
+        print_info(f"Latest dashboard: {last['dashboard_path']}")
 
     return 0
 
@@ -1925,6 +2067,211 @@ def command_report_run(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_signals_run(args: argparse.Namespace) -> int:
+    run_dir = Path(args.run_dir)
+    if not run_dir.exists():
+        print_fail(f"Run directory not found: {run_dir}")
+        return 1
+
+    detector = SignalDetector(run_dir)
+    summary = run_step("Detecting vulnerability signals", detector.detect, "Signal detection completed")
+    report_path = run_step(
+        "Refreshing general report",
+        lambda: ReportGenerator(run_dir).generate(),
+        "General report refreshed",
+    )
+    index_summary = run_step(
+        "Updating artifact dashboard",
+        lambda: ArtifactIndexBuilder(run_dir).build(),
+        "Artifact dashboard updated",
+    )
+
+    print_ok("Vulnerability signal detection completed.")
+    print_info(f"Signals: {summary.total_signals}")
+    print_info(f"Critical: {summary.critical_count}")
+    print_info(f"High: {summary.high_count}")
+    print_info(f"Medium: {summary.medium_count}")
+    print_info(f"Low: {summary.low_count}")
+    print_info(f"JSON: {summary.signals_json_path}")
+    print_info(f"Markdown: {summary.signals_markdown_path}")
+    print_info(f"General report: {report_path}")
+    print_info(f"Dashboard file: {index_summary.index_markdown_path}")
+    return 0
+
+
+def command_deep_hunt(args: argparse.Namespace) -> int:
+    run_dir = Path(args.run_dir)
+    if not run_dir.exists():
+        print_fail(f"Run directory not found: {run_dir}")
+        return 1
+
+    ctx = load_run_context(run_dir)
+    scope = load_scope(ctx.profile_name)
+    explanation = scope.explain(ctx.target_url)
+    if not explanation["allowed"]:
+        print_fail("Deep hunt blocked because the stored run target is now out of scope.")
+        print(explanation)
+        return 1
+    if not explanation["authorization_confirmed"]:
+        print_fail("Deep hunt blocked because authorization is not confirmed for this profile.")
+        print(explanation)
+        return 1
+
+    detector = SignalDetector(run_dir)
+    signal_summary = run_step("Refreshing vulnerability signals", detector.detect, "Signals refreshed")
+
+    hunter = DeepHunter(scope=scope, run_context=ctx)
+    deep_summary = run_step(
+        "Running policy-safe deep hunt",
+        lambda: hunter.run(signal_type=args.signal_type, max_signals=args.max_signals),
+        "Deep hunt completed",
+    )
+    report_path = run_step(
+        "Refreshing general report",
+        lambda: ReportGenerator(run_dir).generate(),
+        "General report refreshed",
+    )
+    index_summary = run_step(
+        "Updating artifact dashboard",
+        lambda: ArtifactIndexBuilder(run_dir).build(),
+        "Artifact dashboard updated",
+    )
+
+    print_ok("Deep hunt completed.")
+    print_info(f"Signals available: {signal_summary.total_signals}")
+    print_info(f"Investigated signals: {deep_summary.investigated_count}")
+    print_info(f"Escalated: {deep_summary.escalated_count}")
+    print_info(f"Ruled out: {deep_summary.ruled_out_count}")
+    print_info(f"Read-only requests used: {deep_summary.total_request_count}")
+    print_info(f"JSON: {deep_summary.deep_hunt_json_path}")
+    print_info(f"Markdown: {deep_summary.deep_hunt_markdown_path}")
+    print_info(f"General report: {report_path}")
+    print_info(f"Dashboard file: {index_summary.index_markdown_path}")
+    return 0
+
+
+def command_hunt(args: argparse.Namespace) -> int:
+    existing = {str(path) for path in list_run_dirs()}
+    quick_scan_result = command_quick_scan(args)
+    if quick_scan_result != 0:
+        return quick_scan_result
+
+    run_dir = find_new_run_dir(existing)
+    if run_dir is None:
+        print_fail("Hunt could not identify the run directory created by quick scan.")
+        return 1
+
+    detector = SignalDetector(run_dir)
+    signal_summary = run_step("Detecting vulnerability signals", detector.detect, "Signal detection completed")
+
+    ctx = load_run_context(run_dir)
+    scope = load_scope(ctx.profile_name)
+    hunter = DeepHunter(scope=scope, run_context=ctx)
+    deep_summary = run_step(
+        "Running policy-safe deep hunt",
+        lambda: hunter.run(signal_type=args.signal_type, max_signals=args.max_signals),
+        "Deep hunt completed",
+    )
+    report_path = run_step(
+        "Refreshing general report",
+        lambda: ReportGenerator(run_dir).generate(),
+        "General report refreshed",
+    )
+    index_summary = run_step(
+        "Updating artifact dashboard",
+        lambda: ArtifactIndexBuilder(run_dir).build(),
+        "Artifact dashboard updated",
+    )
+
+    print_ok("Full hunt completed.")
+    print_info(f"Run directory: {run_dir}")
+    print_info(f"Signals: {signal_summary.total_signals}")
+    print_info(f"Deep-hunt investigated: {deep_summary.investigated_count}")
+    print_info(f"Deep-hunt escalated: {deep_summary.escalated_count}")
+    print_info(f"Signals report: {signal_summary.signals_markdown_path}")
+    print_info(f"Deep hunt report: {deep_summary.deep_hunt_markdown_path}")
+    print_info(f"General report: {report_path}")
+    print_info(f"Dashboard file: {index_summary.index_markdown_path}")
+    return 0
+
+
+def command_last_run(_: argparse.Namespace) -> int:
+    latest_runs = list_run_dirs()
+    if not latest_runs:
+        print_fail("No runs found.")
+        return 1
+
+    run_dir = latest_runs[0]
+    dashboard_path = run_dir / "reports" / "index.md"
+    print_ok("Latest run located.")
+    print_info(f"Run directory: {run_dir}")
+    print_info(f"Dashboard: {dashboard_path if dashboard_path.exists() else '(missing)'}")
+    print_info(f"Review queue: {run_dir / 'reports' / 'review_queue.md'}")
+    print_info(f"Signals: {run_dir / 'reports' / 'signals.md'}")
+    print_info(f"Deep hunt: {run_dir / 'reports' / 'deep_hunt.md'}")
+    return 0
+
+
+def command_compare_runs(args: argparse.Namespace) -> int:
+    run_a = Path(args.run_a)
+    run_b = Path(args.run_b)
+    if not run_a.exists():
+        print_fail(f"Run directory not found: {run_a}")
+        return 1
+    if not run_b.exists():
+        print_fail(f"Run directory not found: {run_b}")
+        return 1
+
+    summary_a = _comparison_summary(run_a)
+    summary_b = _comparison_summary(run_b)
+
+    print_ok("Run comparison completed.")
+    print_info(f"Run A: {run_a}")
+    print_info(f"Run B: {run_b}")
+    for key in [
+        "validation_items",
+        "ranked_candidates",
+        "signals",
+        "start_now",
+        "manual_review",
+        "deep_hunt_escalated",
+        "final_report_items",
+    ]:
+        delta = summary_b.get(key, 0) - summary_a.get(key, 0)
+        print_info(
+            f"{key}: A={summary_a.get(key, 0)} | B={summary_b.get(key, 0)} | delta={delta:+d}"
+        )
+    return 0
+
+
+def _comparison_summary(run_dir: Path) -> dict[str, int]:
+    validation_plan = _read_json_file(run_dir / "parsed" / "validation_plan.json")
+    ranked = _read_json_file(run_dir / "parsed" / "ranked_candidates.json")
+    signals = _read_json_file(run_dir / "parsed" / "signals.json")
+    queue = _read_json_file(run_dir / "parsed" / "review_queue.json")
+    deep_hunt = _read_json_file(run_dir / "parsed" / "deep_hunt.json")
+    final_report = _read_json_file(run_dir / "parsed" / "final_report_draft.json")
+    return {
+        "validation_items": len(validation_plan.get("items", [])),
+        "ranked_candidates": len(ranked.get("ranked_candidates", [])),
+        "signals": len(signals.get("signals", [])),
+        "start_now": int(queue.get("start_now_count", 0)),
+        "manual_review": int(queue.get("manual_review_count", 0)),
+        "deep_hunt_escalated": int(deep_hunt.get("escalated_count", 0)),
+        "final_report_items": int(final_report.get("report_draft_items", 0)),
+    }
+
+
+def _read_json_file(path: Path) -> dict:
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
 def command_quick_scan(args: argparse.Namespace) -> int:
     scope = load_scope(args.profile)
     allowed, result = validate_target_or_fail(
@@ -2212,6 +2559,20 @@ def build_parser() -> argparse.ArgumentParser:
     doctor_parser = subparsers.add_parser("doctor", help="Check project setup and configuration")
     doctor_parser.set_defaults(func=command_doctor)
 
+    interactive_parser = subparsers.add_parser(
+        "interactive",
+        help="Run the autonomous, policy-safe default agent flow",
+    )
+    add_profile_argument(interactive_parser)
+    interactive_parser.add_argument("--target", help="Optional target override for the selected profile")
+    interactive_parser.add_argument(
+        "--max-cycles",
+        type=int,
+        default=2,
+        help="Maximum autonomous investigation cycles before stopping safely",
+    )
+    interactive_parser.set_defaults(func=command_interactive)
+
     profiles_parser = subparsers.add_parser("profiles", help="List configured scope profiles")
     profiles_parser.set_defaults(func=command_profiles)
 
@@ -2302,7 +2663,80 @@ def build_parser() -> argparse.ArgumentParser:
         default="runs/onboarding",
         help="Directory where onboarding bundles should be written",
     )
+    onboard_parser.add_argument(
+        "--no-install-profile",
+        dest="install_profile",
+        action="store_false",
+        help="Do not copy the generated profile stub into configs/profiles/",
+    )
+    onboard_parser.set_defaults(install_profile=True)
     onboard_parser.set_defaults(func=command_program_onboard)
+
+    remote_onboard_parser = subparsers.add_parser(
+        "onboard",
+        help="Fetch an official policy URL, build a review-first bundle, and install a generated profile stub",
+    )
+    remote_onboard_parser.add_argument(
+        "--program",
+        required=True,
+        help="Profile name slug for the generated program profile",
+    )
+    remote_onboard_parser.add_argument(
+        "--policy-url",
+        required=True,
+        help="Official bug bounty policy or scope URL",
+    )
+    remote_onboard_parser.add_argument(
+        "--base-url",
+        required=True,
+        help="Primary base URL for the generated program profile",
+    )
+    remote_onboard_parser.add_argument(
+        "--append-policy",
+        action="append",
+        default=[],
+        help="Additional local policy files to merge into the onboarding bundle.",
+    )
+    remote_onboard_parser.add_argument(
+        "--allowed-host",
+        action="append",
+        default=[],
+        help="Allowed host for the profile. Defaults to the base URL host when omitted.",
+    )
+    remote_onboard_parser.add_argument(
+        "--allowed-pattern",
+        action="append",
+        default=[],
+        help="Allowed URL pattern for the profile. Defaults to <base-url>/* when omitted.",
+    )
+    remote_onboard_parser.add_argument(
+        "--blocked-path-prefix",
+        action="append",
+        default=[],
+        help="Blocked path prefix to keep unsafe routes excluded by default.",
+    )
+    remote_onboard_parser.add_argument(
+        "--fetch-output-dir",
+        default="runs/policy-fetch",
+        help="Directory where fetched policy bundles should be written",
+    )
+    remote_onboard_parser.add_argument(
+        "--fetch-slug",
+        help="Optional bundle slug override for the fetched policy source",
+    )
+    remote_onboard_parser.add_argument(
+        "--output-dir",
+        default="runs/onboarding",
+        help="Directory where onboarding bundles should be written",
+    )
+    remote_onboard_parser.add_argument(
+        "--no-install-profile",
+        dest="install_profile",
+        action="store_false",
+        help="Do not copy the generated profile stub into configs/profiles/",
+    )
+    remote_onboard_parser.set_defaults(install_profile=True)
+    remote_onboard_parser.set_defaults(func=command_onboard)
 
     tools_parser = subparsers.add_parser("tools-check", help="Check installed external security tools")
     tools_parser.set_defaults(func=command_tools_check)
@@ -2538,6 +2972,13 @@ def build_parser() -> argparse.ArgumentParser:
     browser_evidence_parser.add_argument("--no-manual-review", action="store_true", help="Do not capture Manual Review items")
     browser_evidence_parser.set_defaults(func=command_browser_evidence_run)
 
+    signals_parser = subparsers.add_parser(
+        "signals-run",
+        help="Extract policy-safe vulnerability signals from an existing run",
+    )
+    signals_parser.add_argument("run_dir", help="Run directory path")
+    signals_parser.set_defaults(func=command_signals_run)
+
     session_compare_parser = subparsers.add_parser(
         "session-compare-run",
         help="Compare unauthenticated and authenticated endpoint behavior for an existing run",
@@ -2566,6 +3007,15 @@ def build_parser() -> argparse.ArgumentParser:
     report_parser.add_argument("run_dir", help="Run directory path")
     report_parser.set_defaults(func=command_report_run)
 
+    deep_hunt_parser = subparsers.add_parser(
+        "deep-hunt",
+        help="Run policy-safe signal-driven follow-up on an existing authorized run",
+    )
+    deep_hunt_parser.add_argument("run_dir", help="Run directory path")
+    deep_hunt_parser.add_argument("--signal-type", default=None, help="Only investigate one signal type")
+    deep_hunt_parser.add_argument("--max-signals", type=int, default=10, help="Maximum number of signals to investigate")
+    deep_hunt_parser.set_defaults(func=command_deep_hunt)
+
     quick_scan_parser = subparsers.add_parser(
         "quick-scan",
         help="Run safe workflow: probe + httpx + katana + nuclei + normalize + js-analyze + endpoint-validate + triage + validation-plan + rank + review-queue + report",
@@ -2585,6 +3035,36 @@ def build_parser() -> argparse.ArgumentParser:
     quick_scan_parser.add_argument("--max-recon-backlog", type=int, default=20, help="Maximum recon-backlog queue items")
     quick_scan_parser.add_argument("--max-noise", type=int, default=20, help="Maximum likely-noise queue items")
     quick_scan_parser.set_defaults(func=command_quick_scan)
+
+    hunt_parser = subparsers.add_parser(
+        "hunt",
+        help="Run quick-scan and then policy-safe signal-driven deep hunt",
+    )
+    add_profile_argument(hunt_parser)
+    hunt_parser.add_argument("target", help="Target URL or domain")
+    hunt_parser.add_argument("--signal-type", default=None, help="Only deep-hunt one signal type")
+    hunt_parser.add_argument("--max-signals", type=int, default=10, help="Maximum signals to investigate after quick-scan")
+    hunt_parser.add_argument("--depth", type=int, default=1, help="Katana crawl depth")
+    hunt_parser.add_argument("--template", default="templates/lab/juice-shop-detect.yaml", help="Nuclei template path")
+    hunt_parser.add_argument("--severity", default="info,low,medium", help="Nuclei severity filter")
+    hunt_parser.add_argument("--rate-limit", type=int, default=10, help="Nuclei requests per second limit")
+    hunt_parser.add_argument("--scan-timeout", type=int, default=30, help="Maximum nuclei subprocess timeout in seconds")
+    hunt_parser.add_argument("--max-js-assets", type=int, default=20, help="Maximum JavaScript assets to download and analyze")
+    hunt_parser.add_argument("--max-endpoints", type=int, default=60, help="Maximum discovered endpoints to validate")
+    hunt_parser.add_argument("--max-start-now", type=int, default=10, help="Maximum top-priority review queue items")
+    hunt_parser.add_argument("--max-manual-review", type=int, default=20, help="Maximum manual-review queue items")
+    hunt_parser.add_argument("--max-review-later", type=int, default=20, help="Maximum review-later queue items")
+    hunt_parser.add_argument("--max-recon-backlog", type=int, default=20, help="Maximum recon-backlog queue items")
+    hunt_parser.add_argument("--max-noise", type=int, default=20, help="Maximum likely-noise queue items")
+    hunt_parser.set_defaults(func=command_hunt)
+
+    last_run_parser = subparsers.add_parser("last-run", help="Show paths for the latest run dashboard and core artifacts")
+    last_run_parser.set_defaults(func=command_last_run)
+
+    compare_parser = subparsers.add_parser("compare", help="Compare two existing runs by high-level artifact counts")
+    compare_parser.add_argument("run_a", help="Older or baseline run directory")
+    compare_parser.add_argument("run_b", help="Newer or comparison run directory")
+    compare_parser.set_defaults(func=command_compare_runs)
 
     return parser
 
