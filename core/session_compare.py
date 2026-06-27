@@ -189,6 +189,9 @@ class SessionCompareRunner:
         for result in self._seeded_surface_targets():
             self._add_candidate(candidates, seen, result)
 
+        for result in self._policy_seed_targets():
+            self._add_candidate(candidates, seen, result)
+
         for result in self._session_probe_targets(session):
             self._add_candidate(candidates, seen, result)
 
@@ -298,6 +301,51 @@ class SessionCompareRunner:
 
         return seeded
 
+    def _policy_seed_targets(self) -> list[dict]:
+        seeded: list[dict] = []
+
+        for area in self.scope.config.policy.focus_areas:
+            if not isinstance(area, dict):
+                continue
+
+            for command in area.get("commands", []):
+                expanded = self._expand_policy_text(str(command))
+                for url in self._extract_urls(expanded):
+                    if not self.scope.is_target_allowed(url):
+                        continue
+                    seeded.append(
+                        {
+                            "url": url,
+                            "source": f"policy_focus_command:{area.get('id', 'focus-area')}",
+                            "category": self.validator._classify_endpoint(url),
+                            "interesting": True,
+                            "accessible": True,
+                            "auth_likely_required": self._matches_focus_keyword(url),
+                            "exposure_likely": False,
+                        }
+                    )
+
+        for recipe in self.scope.config.policy.operator_recipes:
+            if not isinstance(recipe, dict):
+                continue
+            expanded = self._expand_policy_text(str(recipe.get("command", "")))
+            for url in self._extract_urls(expanded):
+                if not self.scope.is_target_allowed(url):
+                    continue
+                seeded.append(
+                    {
+                        "url": url,
+                        "source": f"policy_operator_recipe:{recipe.get('id', 'recipe')}",
+                        "category": self.validator._classify_endpoint(url),
+                        "interesting": self._matches_focus_keyword(url),
+                        "accessible": True,
+                        "auth_likely_required": "api" in url.lower() or self._matches_focus_keyword(url),
+                        "exposure_likely": False,
+                    }
+                )
+
+        return seeded
+
     def _add_candidate(self, candidates: list[dict], seen: set[str], candidate: dict) -> None:
         url = str(candidate.get("url", "")).strip()
         if not url or not self.scope.is_target_allowed(url):
@@ -347,6 +395,21 @@ class SessionCompareRunner:
                 if str(keyword).strip().lower() in lowered:
                     return True
         return False
+
+    def _expand_policy_text(self, value: str) -> str:
+        replacements = {
+            "base_url": self.scope.config.base_url,
+            "profile_name": self.scope.config.profile_name,
+            "program_name": self.scope.config.policy.program_name,
+            "target_url": self.scope.config.base_url,
+        }
+        try:
+            return value.format(**replacements)
+        except Exception:
+            return value
+
+    def _extract_urls(self, text: str) -> list[str]:
+        return [part.rstrip(".,)") for part in text.split() if part.startswith(("http://", "https://"))]
 
     def _compare_single(
         self,

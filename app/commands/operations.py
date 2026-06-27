@@ -3,31 +3,11 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+from app.commands.shared import PROJECT_ROOT, load_scope, print_fail, print_info, print_ok
 from core.autonomous_agent import AutonomousAgent
 from core.browser_evidence import check_browser_runtime
-from core.console import print_status
 from core.run_context import create_run_context
-from core.scope import ScopeManager
 from core.tool_inventory import ToolInventory, print_tool_report
-
-
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-
-
-def print_ok(message: str) -> None:
-    print_status("ok", message)
-
-
-def print_fail(message: str) -> None:
-    print_status("fail", message)
-
-
-def print_info(message: str) -> None:
-    print_status("info", message)
-
-
-def load_scope(profile_name: str | None = None) -> ScopeManager:
-    return ScopeManager(str(PROJECT_ROOT / "configs" / "scope.yaml"), profile_name=profile_name)
 
 
 def command_doctor(_: argparse.Namespace) -> int:

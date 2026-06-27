@@ -12,7 +12,7 @@ from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 import json
 import os
 import re
@@ -349,8 +349,7 @@ class AutonomousAgent:
         return next((item for item in candidates if item.active), None)
 
     def derive_targets(self, scope: ScopeManager, selected_target: str) -> list[str]:
-        targets: list[str] = []
-        self._append_if_in_scope(scope, targets, selected_target)
+        candidates: list[str] = [selected_target]
 
         for area in scope.config.policy.focus_areas:
             if not isinstance(area, dict):
@@ -360,20 +359,31 @@ class AutonomousAgent:
                 keyword = str(path_keyword).strip()
                 if not keyword.startswith("/"):
                     continue
-                self._append_if_in_scope(scope, targets, self._join_url(selected_target, keyword))
+                candidates.append(self._join_url(selected_target, keyword))
 
             for command in area.get("commands", []):
                 for url in self._extract_urls(self._expand_policy_text(scope, str(command))):
-                    self._append_if_in_scope(scope, targets, url)
+                    candidates.append(url)
 
         for recipe in scope.config.policy.operator_recipes:
             if not isinstance(recipe, dict):
                 continue
             command = self._expand_policy_text(scope, str(recipe.get("command", "")))
             for url in self._extract_urls(command):
-                self._append_if_in_scope(scope, targets, url)
+                candidates.append(url)
 
-        return targets[:6]
+        for profile in scope.list_session_profiles():
+            profile_name = str(profile.get("name", "")).strip()
+            if not profile_name:
+                continue
+            try:
+                session_profile = scope.get_session_profile(profile_name)
+            except KeyError:
+                continue
+            candidates.extend(str(url).strip() for url in session_profile.probe_urls if str(url).strip())
+
+        candidates.extend(self._allowed_host_roots(scope, selected_target))
+        return self._prioritize_targets(scope, selected_target, candidates)[:8]
 
     def build_cycle_plans(
         self,
@@ -779,6 +789,58 @@ class AutonomousAgent:
         explanation = scope.explain(normalized)
         if explanation["allowed"]:
             targets.append(explanation["normalized_url"])
+
+    def _allowed_host_roots(self, scope: ScopeManager, selected_target: str) -> list[str]:
+        parsed_target = urlparse(selected_target)
+        scheme = parsed_target.scheme or "https"
+        return [
+            f"{scheme}://{str(host).strip()}"
+            for host in scope.config.allowed_hosts
+            if str(host).strip()
+        ]
+
+    def _prioritize_targets(
+        self,
+        scope: ScopeManager,
+        selected_target: str,
+        candidates: list[str],
+    ) -> list[str]:
+        deduped: list[str] = []
+        for candidate in candidates:
+            self._append_if_in_scope(scope, deduped, candidate)
+
+        selected = str(selected_target).strip()
+        remaining = [item for item in deduped if item != selected]
+        remaining.sort(
+            key=lambda item: (-self._target_priority(item), len(item), item),
+        )
+        return [selected, *remaining] if selected in deduped else remaining
+
+    def _target_priority(self, url: str) -> int:
+        parsed = urlparse(url)
+        host = (parsed.hostname or "").lower()
+        path = parsed.path.lower()
+        score = 0
+
+        if "api" in host:
+            score += 9
+        if "mcp" in host:
+            score += 7
+        if host.startswith("www."):
+            score += 2
+        if "/v0/" in path or "/meta" in path:
+            score += 8
+        if "/graphql" in path:
+            score += 7
+        if "/developers/web/api" in path:
+            score += 6
+        if "/api" in path:
+            score += 5
+        if any(token in path for token in ["/session", "/auth", "/login"]):
+            score += 4
+        if any(token in path for token in ["/internal", "/admin", "/manage"]):
+            score += 4
+        return score
 
     def _join_url(self, base_url: str, path: str) -> str:
         normalized_base = base_url.rstrip("/") + "/"

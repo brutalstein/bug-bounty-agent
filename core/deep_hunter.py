@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
+import hashlib
 from pathlib import Path
 import json
 import time
@@ -19,6 +21,18 @@ MAX_SIGNALS_PER_RUN = 10
 MAX_ITERATIONS_PER_SIGNAL = 8
 MAX_TOTAL_REQUESTS_PER_RUN = 500
 SIGNAL_TIMEOUT_SECONDS = 120
+METHODS_BY_SIGNAL_TYPE = {
+    "IDOR": ["context_from_ranked_candidates", "js_context_review", "safe_reprobe_get"],
+    "AUTH_BYPASS": ["context_from_ranked_candidates", "safe_reprobe_get", "header_policy_review"],
+    "SENSITIVE_DATA": ["safe_reprobe_get", "response_shape_review", "context_from_ranked_candidates"],
+    "ADMIN_EXPOSURE": ["safe_reprobe_get", "context_from_ranked_candidates", "header_policy_review"],
+    "JWT_ISSUES": ["js_context_review", "context_from_ranked_candidates"],
+    "SSRF_CANDIDATE": ["js_context_review", "redirect_behavior_review"],
+    "CORS_MISCONFIG": ["header_policy_review", "safe_reprobe_get"],
+    "INFO_DISCLOSURE": ["safe_reprobe_get", "response_shape_review"],
+    "OPEN_REDIRECT": ["redirect_behavior_review", "js_context_review"],
+    "BROKEN_ACCESS_CONTROL": ["context_from_ranked_candidates", "safe_reprobe_get"],
+}
 
 
 @dataclass
@@ -60,6 +74,8 @@ class DeepHunter:
         self.endpoint_validation = self._read_json(self.parsed_dir / "endpoint_validation.json")
         self.js_analysis = self._read_json(self.parsed_dir / "js_analysis.json")
         self.ranked_candidates = self._read_json(self.parsed_dir / "ranked_candidates.json")
+        self.endpoint_validation_by_url = self._index_endpoint_validation(self.endpoint_validation)
+        self.ranked_candidates_by_target = self._index_ranked_candidates(self.ranked_candidates)
         self.llm_backend = current_llm_backend("signal_analysis")
         self.llm_review_budget_used = 0
         self.llm_review_budget_limit = 0
@@ -83,18 +99,19 @@ class DeepHunter:
                 continue
             if signal_type and str(item.get("signal_type", "")).upper() != signal_type.upper():
                 continue
-            selected.append(json.loads(json.dumps(item)))
+            selected.append(deepcopy(item))
 
         investigated: list[dict] = []
+        selected_signals = selected[:max_signals]
         llm_candidate_count = sum(
             1
-            for item in selected[:max_signals]
+            for item in selected_signals
             if isinstance(item, dict)
             and isinstance(item.get("evidence", {}), dict)
             and item.get("evidence", {}).get("llm_candidate") is True
         )
-        self.llm_review_budget_limit = max(2, min(10, max(len(selected[:max_signals]) * 2, llm_candidate_count * 3)))
-        for signal in selected[:max_signals]:
+        self.llm_review_budget_limit = max(2, min(10, max(len(selected_signals) * 2, llm_candidate_count * 3)))
+        for signal in selected_signals:
             investigated.append(self._investigate_signal(signal))
 
         summary = DeepHuntSummary(
@@ -155,7 +172,7 @@ class DeepHunter:
         signal.setdefault("llm_notes", [])
         signal.setdefault("signal_id", f"{signal.get('signal_type', 'signal')}::{signal.get('endpoint', 'unknown')}")
         iteration_count = 0
-        started_at = time.time()
+        started_at = time.monotonic()
 
         while self._should_continue_signal(signal, iteration_count, started_at):
             available_methods = [
@@ -217,7 +234,7 @@ class DeepHunter:
         if float(signal.get("confidence", 0.0)) <= 0.1:
             signal["status"] = "ruled_out"
             return False
-        if time.time() - started_at >= SIGNAL_TIMEOUT_SECONDS:
+        if time.monotonic() - started_at >= SIGNAL_TIMEOUT_SECONDS:
             signal["findings"].append(
                 {
                     "kind": "timeout_note",
@@ -228,19 +245,7 @@ class DeepHunter:
         return True
 
     def _methods_for_signal(self, signal: dict) -> list[str]:
-        mapping = {
-            "IDOR": ["context_from_ranked_candidates", "js_context_review", "safe_reprobe_get"],
-            "AUTH_BYPASS": ["context_from_ranked_candidates", "safe_reprobe_get", "header_policy_review"],
-            "SENSITIVE_DATA": ["safe_reprobe_get", "response_shape_review", "context_from_ranked_candidates"],
-            "ADMIN_EXPOSURE": ["safe_reprobe_get", "context_from_ranked_candidates", "header_policy_review"],
-            "JWT_ISSUES": ["js_context_review", "context_from_ranked_candidates"],
-            "SSRF_CANDIDATE": ["js_context_review", "redirect_behavior_review"],
-            "CORS_MISCONFIG": ["header_policy_review", "safe_reprobe_get"],
-            "INFO_DISCLOSURE": ["safe_reprobe_get", "response_shape_review"],
-            "OPEN_REDIRECT": ["redirect_behavior_review", "js_context_review"],
-            "BROKEN_ACCESS_CONTROL": ["context_from_ranked_candidates", "safe_reprobe_get"],
-        }
-        return mapping.get(str(signal.get("signal_type", "")).upper(), ["context_from_ranked_candidates"])
+        return METHODS_BY_SIGNAL_TYPE.get(str(signal.get("signal_type", "")).upper(), ["context_from_ranked_candidates"])
 
     def _select_next_method(self, signal: dict, available_methods: list[str]) -> str:
         if not self._should_use_llm(signal, stage="method_selection"):
@@ -316,27 +321,30 @@ class DeepHunter:
         stage: str,
         available_methods: list[str] | None = None,
     ):
-        if self._is_llm_stage_duplicate(signal, stage, available_methods):
+        signal_key = self._signal_key(signal)
+        stage_hash = self._llm_stage_hash(signal, stage, available_methods)
+        if self.llm_stage_hashes.get(signal_key, {}).get(stage) == stage_hash:
             return None
 
         response = analyze_signal(signal, available_methods=available_methods)
         self.llm_review_budget_used += 1
-        signal_key = self._signal_key(signal)
         self.llm_signal_counts[signal_key] = self.llm_signal_counts.get(signal_key, 0) + 1
         self._record_llm_usage(signal, stage, response)
-        self._remember_llm_stage_hash(signal, stage, available_methods)
+        self.llm_stage_hashes.setdefault(signal_key, {})[stage] = stage_hash
         return response
 
     def _maybe_generate_report_section(self, signal: dict):
         if not self._should_use_llm(signal, stage="report_section"):
             return None
-        if self._is_llm_stage_duplicate(signal, "report_section", None):
+        signal_key = self._signal_key(signal)
+        stage_hash = self._llm_stage_hash(signal, "report_section", None)
+        if self.llm_stage_hashes.get(signal_key, {}).get("report_section") == stage_hash:
             return None
 
         response = generate_report_section(signal, signal.get("findings", []))
         self.llm_review_budget_used += 1
         self._record_llm_usage(signal, "report_section", response)
-        self._remember_llm_stage_hash(signal, "report_section", None)
+        self.llm_stage_hashes.setdefault(signal_key, {})["report_section"] = stage_hash
         return response
 
     def _signal_key(self, signal: dict) -> str:
@@ -354,16 +362,7 @@ class DeepHunter:
             "findings": signal.get("findings", [])[-4:],
         }
         normalized = json.dumps(payload, ensure_ascii=False, sort_keys=True)
-        return str(abs(hash(normalized)))
-
-    def _is_llm_stage_duplicate(self, signal: dict, stage: str, available_methods: list[str] | None) -> bool:
-        signal_key = self._signal_key(signal)
-        stage_hash = self._llm_stage_hash(signal, stage, available_methods)
-        return self.llm_stage_hashes.get(signal_key, {}).get(stage) == stage_hash
-
-    def _remember_llm_stage_hash(self, signal: dict, stage: str, available_methods: list[str] | None) -> None:
-        signal_key = self._signal_key(signal)
-        self.llm_stage_hashes.setdefault(signal_key, {})[stage] = self._llm_stage_hash(signal, stage, available_methods)
+        return hashlib.sha1(normalized.encode("utf-8")).hexdigest()
 
     def _record_llm_usage(self, signal: dict, stage: str, response) -> None:
         self.llm_usage_events.append(
@@ -381,12 +380,8 @@ class DeepHunter:
         )
 
     def _method_context_from_ranked_candidates(self, signal: dict) -> dict:
-        ranked_items = self.ranked_candidates.get("ranked_candidates", [])
-        if not isinstance(ranked_items, list):
-            return signal
-
         endpoint = str(signal.get("endpoint", ""))
-        match = next((item for item in ranked_items if str(item.get("target", "")) == endpoint), None)
+        match = self.ranked_candidates_by_target.get(endpoint)
         if not match:
             signal["confidence"] = max(0.1, float(signal.get("confidence", 0.0)) - 0.02)
             signal["findings"].append(
@@ -534,11 +529,7 @@ class DeepHunter:
 
     def _method_response_shape_review(self, signal: dict) -> dict:
         endpoint = str(signal.get("endpoint", "")).strip()
-        results = self.endpoint_validation.get("results", [])
-        match = None
-        if isinstance(results, list):
-            match = next((item for item in results if isinstance(item, dict) and str(item.get("url", "")) == endpoint), None)
-
+        match = self.endpoint_validation_by_url.get(endpoint)
         if not match:
             signal["findings"].append(
                 {
@@ -703,3 +694,23 @@ class DeepHunter:
         except json.JSONDecodeError:
             return {}
         return data if isinstance(data, dict) else {}
+
+    def _index_endpoint_validation(self, data: dict) -> dict[str, dict]:
+        results = data.get("results", []) if isinstance(data, dict) else []
+        if not isinstance(results, list):
+            return {}
+        return {
+            str(item.get("url", "")).strip(): item
+            for item in results
+            if isinstance(item, dict) and str(item.get("url", "")).strip()
+        }
+
+    def _index_ranked_candidates(self, data: dict) -> dict[str, dict]:
+        items = data.get("ranked_candidates", []) if isinstance(data, dict) else []
+        if not isinstance(items, list):
+            return {}
+        return {
+            str(item.get("target", "")).strip(): item
+            for item in items
+            if isinstance(item, dict) and str(item.get("target", "")).strip()
+        }

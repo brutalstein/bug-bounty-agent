@@ -15,6 +15,30 @@ from app.commands.operations import (
     command_self_test,
     command_tools_check,
 )
+from app.commands.reporting import (
+    command_compare_runs,
+    command_deep_hunt,
+    command_final_report_run,
+    command_last_run,
+    command_report_run,
+    command_signals_run,
+)
+from app.commands.shared import (
+    PROJECT_ROOT,
+    build_dashboard_safely,
+    create_safe_run,
+    fail_run,
+    find_new_run_dir,
+    list_run_dirs,
+    load_run_context,
+    load_scope,
+    print_fail,
+    print_info,
+    print_ok,
+    run_step,
+    validate_target_or_fail,
+    write_scope_artifacts,
+)
 from core.artifact_index import ArtifactIndexBuilder
 from core.auth_session import AuthenticatedSessionManager
 from core.authenticated_crawl import AuthenticatedCrawlRunner
@@ -53,42 +77,11 @@ from tools.nmap_tools import NmapTools, SAFE_DEFAULT_PORTS
 from tools.projectdiscovery_tools import ProjectDiscoveryTools
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-
-
-def print_ok(message: str) -> None:
-    print_status("ok", message)
-
-
-def print_fail(message: str) -> None:
-    print_status("fail", message)
-
-
-def print_info(message: str) -> None:
-    print_status("info", message)
-
-
-def run_step(message: str, func, success_message: str | None = None):
-    spinner = ConsoleSpinner(message)
-    spinner.start()
-    try:
-        result = func()
-    except Exception:
-        spinner.fail(success_message or f"{message} failed")
-        raise
-    spinner.succeed(success_message or message)
-    return result
-
-
 def add_profile_argument(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--profile",
         help="Scope profile name from configs/scope.yaml. Defaults to active_profile.",
     )
-
-
-def load_scope(profile_name: str | None = None) -> ScopeManager:
-    return ScopeManager(str(PROJECT_ROOT / "configs" / "scope.yaml"), profile_name=profile_name)
 
 
 def derive_allowed_scope_inputs(
@@ -167,135 +160,6 @@ def derive_authorized_surface_targets(scope: ScopeManager, seed_target: str) -> 
         )
 
     return deduped_targets[:3]
-
-
-def create_safe_run(scope: ScopeManager, normalized_url: str) -> RunContext:
-    return create_run_context(
-        target_name=scope.config.target_name,
-        target_url=normalized_url,
-        mode=scope.effective_mode(),
-        profile_name=scope.config.profile_name,
-        program_name=scope.config.policy.program_name,
-        program_url=scope.config.policy.program_url,
-        authorization_kind=scope.config.authorization.kind,
-        authorization_confirmed=scope.config.authorization.confirmed,
-    )
-
-
-def load_run_context(run_dir: Path) -> RunContext:
-    run_data_path = run_dir / "run.json"
-
-    if not run_data_path.exists():
-        raise FileNotFoundError(f"run.json not found in: {run_dir}")
-
-    run_data = json.loads(run_data_path.read_text(encoding="utf-8"))
-
-    return RunContext(
-        run_id=run_data["run_id"],
-        target_name=run_data["target_name"],
-        target_url=run_data["target_url"],
-        mode=run_data["mode"],
-        profile_name=run_data.get("profile_name", run_data.get("target_name", "default")),
-        program_name=run_data.get("program_name", ""),
-        program_url=run_data.get("program_url", ""),
-        authorization_kind=run_data.get("authorization_kind", "unknown"),
-        authorization_confirmed=bool(run_data.get("authorization_confirmed", False)),
-        status=run_data["status"],
-        created_at=run_data["created_at"],
-        updated_at=run_data["updated_at"],
-        run_dir=run_data["run_dir"],
-        raw_dir=run_data["raw_dir"],
-        parsed_dir=run_data["parsed_dir"],
-        evidence_dir=run_data["evidence_dir"],
-        reports_dir=run_data.get("reports_dir", str(run_dir / "reports")),
-        logs_dir=run_data["logs_dir"],
-    )
-
-
-def write_scope_artifacts(ctx: RunContext, scope: ScopeManager, scope_result: dict) -> None:
-    ctx.add_event(
-        event_type="scope_check_passed",
-        message="Target passed scope validation.",
-        data=scope_result,
-    )
-    ctx.write_json("parsed/scope_check.json", scope_result)
-    ctx.write_json("parsed/policy_snapshot.json", scope.policy_snapshot())
-    ProgramLensBuilder(scope=scope, run_context=ctx).build()
-
-
-def build_dashboard_safely(run_dir: str | Path) -> str | None:
-    try:
-        summary = ArtifactIndexBuilder(run_dir).build()
-    except Exception:
-        return None
-    return summary.index_markdown_path
-
-
-def list_run_dirs() -> list[Path]:
-    runs_dir = PROJECT_ROOT / "runs"
-    if not runs_dir.exists():
-        return []
-    return sorted(
-        [path for path in runs_dir.iterdir() if path.is_dir()],
-        key=lambda item: item.stat().st_mtime,
-        reverse=True,
-    )
-
-
-def find_new_run_dir(existing: set[str]) -> Path | None:
-    current = list_run_dirs()
-    for path in current:
-        if str(path) not in existing:
-            return path
-    return current[0] if current else None
-
-
-def fail_run(
-    ctx: RunContext,
-    logger,
-    message: str,
-    status: str,
-    data: dict | None = None,
-) -> int:
-    ctx.update_status(status, message, data=data)
-    dashboard_path = build_dashboard_safely(ctx.run_dir)
-    logger.error(message)
-    print_fail(message)
-    print_info(f"Run directory: {ctx.run_dir}")
-    if dashboard_path:
-        print_info(f"Dashboard file: {dashboard_path}")
-    return 1
-
-
-def validate_target_or_fail(
-    scope: ScopeManager,
-    target: str,
-    action_name: str,
-    method: str = "GET",
-    require_authorization: bool = False,
-) -> tuple[bool, dict]:
-    result = scope.explain(target, method=method)
-
-    if not result["allowed"]:
-        print_fail(f"Target is out of scope. {action_name} will not run.")
-        print(result)
-        return False, result
-
-    if require_authorization and not result["authorization_confirmed"]:
-        print_fail(f"Authorization is not confirmed for profile `{scope.config.profile_name}`. {action_name} will not run.")
-        print_info(
-            "Run `python app/main.py profile-readiness --profile "
-            f"{scope.config.profile_name}` after manual scope review to confirm what is still blocking safe network actions."
-        )
-        print(result)
-        return False, result
-
-    if require_authorization and not result["method_allowed"]:
-        print_fail(f"HTTP method `{method.upper()}` is not allowed by policy. {action_name} will not run.")
-        print(result)
-        return False, result
-
-    return True, result
 
 
 def command_policy_parse(args: argparse.Namespace) -> int:
@@ -1763,160 +1627,6 @@ def command_session_compare_run(args: argparse.Namespace) -> int:
     return 0
 
 
-def command_final_report_run(args: argparse.Namespace) -> int:
-    run_dir = Path(args.run_dir)
-
-    if not run_dir.exists():
-        print_fail(f"Run directory not found: {run_dir}")
-        return 1
-
-    composer = FinalReportComposer(run_dir)
-    summary = composer.build(max_items=args.max_items)
-
-    print_ok("Final report draft generated.")
-    print_info(f"Total evidence items: {summary.total_evidence_items}")
-    print_info(f"Report draft items: {summary.report_draft_items}")
-    print_info(f"Candidate items: {summary.candidate_items}")
-    print_info(f"Needs more validation: {summary.needs_more_validation_items}")
-    print_info(f"Markdown: {summary.final_report_markdown_path}")
-
-    return 0
-
-
-def command_report_run(args: argparse.Namespace) -> int:
-    run_dir = Path(args.run_dir)
-
-    if not run_dir.exists():
-        print_fail(f"Run directory not found: {run_dir}")
-        return 1
-
-    normalizer = FindingNormalizer(run_dir)
-    findings = run_step("Normalizing findings", normalizer.normalize, "Findings normalized")
-
-    triage = TriageEngine(run_dir)
-    candidates = run_step("Building triage candidates", triage.triage, "Triage candidates built")
-
-    planner = ValidationPlanner(run_dir)
-    validation_summary = run_step("Creating validation plan", planner.build_plan, "Validation plan created")
-
-    ranker = CandidateRanker(run_dir)
-    ranked_summary = run_step("Ranking candidates", ranker.rank, "Candidate ranking completed")
-
-    queue_builder = ReviewQueueBuilder(run_dir)
-    queue_summary = run_step("Building review queue", queue_builder.build, "Review queue generated")
-
-    evidence_builder = EvidencePackBuilder(run_dir)
-    evidence_summary = run_step("Refreshing evidence pack", evidence_builder.build, "Evidence pack generated")
-
-    final_report_composer = FinalReportComposer(run_dir)
-    final_report_summary = run_step("Drafting final report", final_report_composer.build, "Final report draft generated")
-
-    generator = ReportGenerator(run_dir)
-    report_path = run_step("Generating general report", generator.generate, "General report generated")
-
-    index_builder = ArtifactIndexBuilder(run_dir)
-    index_summary = run_step("Updating artifact dashboard", index_builder.build, "Artifact dashboard updated")
-
-    print_ok("Report draft generated.")
-    print_info(f"Normalized findings: {len(findings)}")
-    print_info(f"Triage candidates: {len(candidates)}")
-    print_info(f"Validation items: {validation_summary.total_items}")
-    print_info(f"Ranked candidates: {ranked_summary.total_ranked}")
-    print_info(f"Review queue start now: {queue_summary.start_now_count}")
-    print_info(f"Review queue file: {queue_summary.queue_markdown_path}")
-    print_info(f"Evidence pack items: {evidence_summary.total_items}")
-    print_info(f"Evidence pack file: {evidence_summary.evidence_markdown_path}")
-    print_info(f"Final report items: {final_report_summary.report_draft_items}")
-    print_info(f"Final report file: {final_report_summary.final_report_markdown_path}")
-    print_info(f"Report file: {report_path}")
-    print_info(f"Dashboard file: {index_summary.index_markdown_path}")
-
-    return 0
-
-
-def command_signals_run(args: argparse.Namespace) -> int:
-    run_dir = Path(args.run_dir)
-    if not run_dir.exists():
-        print_fail(f"Run directory not found: {run_dir}")
-        return 1
-
-    detector = SignalDetector(run_dir)
-    summary = run_step("Detecting vulnerability signals", detector.detect, "Signal detection completed")
-    report_path = run_step(
-        "Refreshing general report",
-        lambda: ReportGenerator(run_dir).generate(),
-        "General report refreshed",
-    )
-    index_summary = run_step(
-        "Updating artifact dashboard",
-        lambda: ArtifactIndexBuilder(run_dir).build(),
-        "Artifact dashboard updated",
-    )
-
-    print_ok("Vulnerability signal detection completed.")
-    print_info(f"Signals: {summary.total_signals}")
-    print_info(f"Critical: {summary.critical_count}")
-    print_info(f"High: {summary.high_count}")
-    print_info(f"Medium: {summary.medium_count}")
-    print_info(f"Low: {summary.low_count}")
-    print_info(f"JSON: {summary.signals_json_path}")
-    print_info(f"Markdown: {summary.signals_markdown_path}")
-    print_info(f"General report: {report_path}")
-    print_info(f"Dashboard file: {index_summary.index_markdown_path}")
-    return 0
-
-
-def command_deep_hunt(args: argparse.Namespace) -> int:
-    run_dir = Path(args.run_dir)
-    if not run_dir.exists():
-        print_fail(f"Run directory not found: {run_dir}")
-        return 1
-
-    ctx = load_run_context(run_dir)
-    scope = load_scope(ctx.profile_name)
-    explanation = scope.explain(ctx.target_url)
-    if not explanation["allowed"]:
-        print_fail("Deep hunt blocked because the stored run target is now out of scope.")
-        print(explanation)
-        return 1
-    if not explanation["authorization_confirmed"]:
-        print_fail("Deep hunt blocked because authorization is not confirmed for this profile.")
-        print(explanation)
-        return 1
-
-    detector = SignalDetector(run_dir)
-    signal_summary = run_step("Refreshing vulnerability signals", detector.detect, "Signals refreshed")
-
-    hunter = DeepHunter(scope=scope, run_context=ctx)
-    deep_summary = run_step(
-        "Running policy-safe deep hunt",
-        lambda: hunter.run(signal_type=args.signal_type, max_signals=args.max_signals),
-        "Deep hunt completed",
-    )
-    report_path = run_step(
-        "Refreshing general report",
-        lambda: ReportGenerator(run_dir).generate(),
-        "General report refreshed",
-    )
-    index_summary = run_step(
-        "Updating artifact dashboard",
-        lambda: ArtifactIndexBuilder(run_dir).build(),
-        "Artifact dashboard updated",
-    )
-
-    print_ok("Deep hunt completed.")
-    print_info(f"Signals available: {signal_summary.total_signals}")
-    print_info(f"Investigated signals: {deep_summary.investigated_count}")
-    print_info(f"Escalated: {deep_summary.escalated_count}")
-    print_info(f"Ruled out: {deep_summary.ruled_out_count}")
-    print_info(f"Read-only requests used: {deep_summary.total_request_count}")
-    print_info(f"JSON: {deep_summary.deep_hunt_json_path}")
-    print_info(f"Markdown: {deep_summary.deep_hunt_markdown_path}")
-    print_info(f"General report: {report_path}")
-    print_info(f"Dashboard file: {index_summary.index_markdown_path}")
-    return 0
-
-
 def command_hunt(args: argparse.Namespace) -> int:
     existing = {str(path) for path in list_run_dirs()}
     quick_scan_result = command_quick_scan(args)
@@ -1960,91 +1670,6 @@ def command_hunt(args: argparse.Namespace) -> int:
     print_info(f"General report: {report_path}")
     print_info(f"Dashboard file: {index_summary.index_markdown_path}")
     return 0
-
-
-def command_last_run(_: argparse.Namespace) -> int:
-    latest_runs = list_run_dirs()
-    if not latest_runs:
-        print_fail("No runs found.")
-        return 1
-
-    run_dir = latest_runs[0]
-    candidate_reports = [
-        run_dir / "reports" / "index.md",
-        run_dir / "reports" / "review_queue.md",
-        run_dir / "reports" / "final_report_draft.md",
-    ]
-    print_ok("Latest run located.")
-    print_info(f"Run directory: {run_dir}")
-    selected_report = next((path for path in candidate_reports if path.exists()), None)
-    print_info(f"Dashboard: {selected_report if selected_report else '(missing)'}")
-    print_info(f"Review queue: {run_dir / 'reports' / 'review_queue.md'}")
-    print_info(f"Signals: {run_dir / 'reports' / 'signals.md'}")
-    print_info(f"Deep hunt: {run_dir / 'reports' / 'deep_hunt.md'}")
-    if selected_report is not None:
-        print("")
-        print(selected_report.read_text(encoding="utf-8"))
-    return 0
-
-
-def command_compare_runs(args: argparse.Namespace) -> int:
-    run_a = Path(args.run_a)
-    run_b = Path(args.run_b)
-    if not run_a.exists():
-        print_fail(f"Run directory not found: {run_a}")
-        return 1
-    if not run_b.exists():
-        print_fail(f"Run directory not found: {run_b}")
-        return 1
-
-    summary_a = _comparison_summary(run_a)
-    summary_b = _comparison_summary(run_b)
-
-    print_ok("Run comparison completed.")
-    print_info(f"Run A: {run_a}")
-    print_info(f"Run B: {run_b}")
-    for key in [
-        "validation_items",
-        "ranked_candidates",
-        "signals",
-        "start_now",
-        "manual_review",
-        "deep_hunt_escalated",
-        "final_report_items",
-    ]:
-        delta = summary_b.get(key, 0) - summary_a.get(key, 0)
-        print_info(
-            f"{key}: A={summary_a.get(key, 0)} | B={summary_b.get(key, 0)} | delta={delta:+d}"
-        )
-    return 0
-
-
-def _comparison_summary(run_dir: Path) -> dict[str, int]:
-    validation_plan = _read_json_file(run_dir / "parsed" / "validation_plan.json")
-    ranked = _read_json_file(run_dir / "parsed" / "ranked_candidates.json")
-    signals = _read_json_file(run_dir / "parsed" / "signals.json")
-    queue = _read_json_file(run_dir / "parsed" / "review_queue.json")
-    deep_hunt = _read_json_file(run_dir / "parsed" / "deep_hunt.json")
-    final_report = _read_json_file(run_dir / "parsed" / "final_report_draft.json")
-    return {
-        "validation_items": len(validation_plan.get("items", [])),
-        "ranked_candidates": len(ranked.get("ranked_candidates", [])),
-        "signals": len(signals.get("signals", [])),
-        "start_now": int(queue.get("start_now_count", 0)),
-        "manual_review": int(queue.get("manual_review_count", 0)),
-        "deep_hunt_escalated": int(deep_hunt.get("escalated_count", 0)),
-        "final_report_items": int(final_report.get("report_draft_items", 0)),
-    }
-
-
-def _read_json_file(path: Path) -> dict:
-    if not path.exists():
-        return {}
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        return {}
-    return data if isinstance(data, dict) else {}
 
 
 def command_quick_scan(args: argparse.Namespace) -> int:
