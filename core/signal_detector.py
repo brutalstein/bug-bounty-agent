@@ -484,8 +484,13 @@ class SignalDetector:
 
     def _apply_policy_alignment(self, signal: VulnSignal) -> VulnSignal:
         signal.evidence = dict(signal.evidence or {})
+        priority_match = self._matches_priority_category(signal)
+        focus_area_matches = self._focus_area_matches(signal.endpoint)
+        focus_keyword_match = bool(focus_area_matches)
         signal.evidence["review_lane"] = self._review_lane(signal)
-        signal.evidence["focus_keyword_match"] = self._matches_focus_keyword(signal.endpoint)
+        signal.evidence["focus_keyword_match"] = focus_keyword_match
+        signal.evidence["focus_area_matches"] = focus_area_matches
+        signal.evidence["policy_priority_category_match"] = priority_match
 
         if signal.signal_type in {
             "AUTH_BYPASS",
@@ -499,7 +504,12 @@ class SignalDetector:
             if signal.signal_type != "SENSITIVE_DATA":
                 signal.bounty_potential = "$$$"
 
-        if signal.evidence["focus_keyword_match"]:
+        if priority_match:
+            signal.confidence = round(min(0.95, signal.confidence + 0.08), 2)
+        else:
+            signal.evidence["program_boost_applied"] = False
+
+        if focus_keyword_match:
             signal.confidence = round(min(0.95, signal.confidence + 0.03), 2)
 
         if self._is_core_ineligible_signal(signal):
@@ -507,9 +517,14 @@ class SignalDetector:
             signal.confidence = round(min(signal.confidence, 0.3), 2)
             signal.bounty_potential = "$"
             signal.evidence["policy_deprioritized"] = True
+            signal.evidence["program_boost_applied"] = False
         else:
             signal.evidence["policy_deprioritized"] = False
+            signal = self._promote_high_value_signal(signal)
+            signal.evidence["program_boost_applied"] = bool(priority_match or focus_keyword_match)
 
+        signal.evidence["llm_candidate"] = self._should_mark_llm_candidate(signal)
+        signal.evidence["llm_reason"] = self._llm_reason(signal) if signal.evidence["llm_candidate"] else ""
         signal.investigation_budget = self._budget_for_priority(signal.priority)
         return signal
 
@@ -604,6 +619,12 @@ class SignalDetector:
             for item in self.policy_snapshot.get("priority_categories", [])
         }
 
+    def _deprioritized_categories(self) -> set[str]:
+        return {
+            str(item).strip().lower()
+            for item in self.policy_snapshot.get("deprioritized_categories", [])
+        }
+
     def _focus_path_keywords(self) -> set[str]:
         keywords: set[str] = set()
         for area in self.policy_snapshot.get("focus_areas", []):
@@ -622,6 +643,103 @@ class SignalDetector:
     def _matches_focus_keyword(self, endpoint: str) -> bool:
         lowered = endpoint.lower()
         return any(keyword and keyword in lowered for keyword in self._focus_path_keywords())
+
+    def _focus_area_matches(self, endpoint: str) -> list[str]:
+        lowered = endpoint.lower()
+        matches: list[str] = []
+        for area in self.policy_snapshot.get("focus_areas", []):
+            if not isinstance(area, dict):
+                continue
+            area_id = str(area.get("id", "")).strip()
+            path_keywords = [str(item).strip().lower() for item in area.get("path_keywords", [])]
+            if any(keyword and keyword in lowered for keyword in path_keywords):
+                matches.append(area_id or "focus-area")
+        return matches
+
+    def _signal_category_tokens(self, signal: VulnSignal) -> set[str]:
+        tokens: set[str] = set()
+        for key in ["category", "matched_rule", "signal_alignment", "review_lane"]:
+            value = str(signal.evidence.get(key, "")).strip().lower()
+            if value:
+                tokens.add(value)
+        tokens.add(signal.signal_type.strip().lower())
+        return tokens
+
+    def _matches_priority_category(self, signal: VulnSignal) -> bool:
+        priority_categories = self._priority_categories()
+        if not priority_categories:
+            return False
+
+        tokens = self._signal_category_tokens(signal)
+        if tokens & priority_categories:
+            return True
+
+        endpoint = signal.endpoint.lower()
+        return any(category and category in endpoint for category in priority_categories)
+
+    def _bump_priority(self, priority: str) -> str:
+        order = ["LOW", "MEDIUM", "HIGH", "CRITICAL"]
+        try:
+            index = order.index(priority.upper())
+        except ValueError:
+            return priority.upper()
+        return order[min(index + 1, len(order) - 1)]
+
+    def _promote_high_value_signal(self, signal: VulnSignal) -> VulnSignal:
+        evidence_notes = {str(item).strip().lower() for item in signal.evidence.get("notes", []) if str(item).strip()}
+        evidence_category = str(signal.evidence.get("category", "")).strip().lower()
+        focus_area_matches = signal.evidence.get("focus_area_matches", [])
+        priority_match = signal.evidence.get("policy_priority_category_match") is True
+
+        if signal.signal_type == "BROKEN_ACCESS_CONTROL":
+            if priority_match or evidence_category in {
+                "authentication_surface",
+                "api_surface",
+                "admin_or_privileged_area",
+                "user_data_surface",
+            }:
+                signal.confidence = round(min(0.95, signal.confidence + 0.1), 2)
+                signal.priority = self._bump_priority(signal.priority)
+                signal.bounty_potential = "$$$"
+
+            if evidence_notes & {"auth_requirement_changed", "new_sensitive_indicators_after_auth"}:
+                signal.confidence = round(min(0.95, signal.confidence + 0.08), 2)
+                signal.priority = self._bump_priority(signal.priority)
+
+        if signal.signal_type == "INFO_DISCLOSURE":
+            deprioritized = evidence_category in self._deprioritized_categories()
+            if priority_match and not deprioritized and focus_area_matches:
+                signal.confidence = round(min(0.95, signal.confidence + 0.06), 2)
+                signal.priority = self._bump_priority(signal.priority)
+
+        return signal
+
+    def _should_mark_llm_candidate(self, signal: VulnSignal) -> bool:
+        if signal.evidence.get("policy_deprioritized") is True:
+            return False
+
+        if signal.priority in {"CRITICAL", "HIGH"}:
+            return True
+
+        if signal.signal_type in {
+            "BROKEN_ACCESS_CONTROL",
+            "AUTH_BYPASS",
+            "IDOR",
+            "SENSITIVE_DATA",
+        }:
+            return True
+
+        if signal.evidence.get("policy_priority_category_match") is True and signal.evidence.get("focus_area_matches"):
+            return True
+
+        return False
+
+    def _llm_reason(self, signal: VulnSignal) -> str:
+        if signal.signal_type == "BROKEN_ACCESS_CONTROL":
+            return "Session or auth boundary changed on a focus-area surface and merits compact reasoning before more probing."
+        if signal.evidence.get("policy_priority_category_match") is True:
+            return "Program priority category matched; use LLM only as a short reasoning layer for next safe step selection."
+        return "High-value access or data-boundary signal warrants cautious next-step reasoning."
 
     def _review_lane(self, signal: VulnSignal) -> str:
         if signal.signal_type in {
@@ -682,6 +800,13 @@ class SignalDetector:
             review_lane = item.get("evidence", {}).get("review_lane")
             if review_lane:
                 lines.append(f"- **Review Lane:** `{review_lane}`")
+            focus_areas = item.get("evidence", {}).get("focus_area_matches", [])
+            if focus_areas:
+                lines.append(f"- **Focus Areas:** `{focus_areas}`")
+            if item.get("evidence", {}).get("policy_priority_category_match") is True:
+                lines.append("- **Program Priority Match:** `true`")
+            if item.get("evidence", {}).get("llm_candidate") is True:
+                lines.append(f"- **LLM Review Candidate:** `{item.get('evidence', {}).get('llm_reason', '')}`")
             lines.append(f"- **Investigation Budget:** `{item.get('investigation_budget')}`")
             matched_rule = item.get("evidence", {}).get("matched_rule", "")
             if matched_rule:

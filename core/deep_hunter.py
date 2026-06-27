@@ -9,7 +9,7 @@ import json
 import time
 
 from core.http_client import SafeHttpClient
-from core.llm_client import analyze_signal, generate_report_section
+from core.llm_client import analyze_signal, current_llm_backend, generate_report_section
 from core.redactor import EvidenceRedactor
 from core.run_context import RunContext
 from core.scope import ScopeManager
@@ -30,6 +30,11 @@ class DeepHuntSummary:
     escalated_count: int
     ruled_out_count: int
     total_request_count: int
+    llm_backend: str
+    llm_calls: int
+    llm_cache_hits: int
+    llm_fallback_calls: int
+    llm_usage_json_path: str
     deep_hunt_json_path: str
     deep_hunt_markdown_path: str
     signals: list[dict]
@@ -50,10 +55,17 @@ class DeepHunter:
         self.redactor = EvidenceRedactor()
         self.output_json_path = self.parsed_dir / "deep_hunt.json"
         self.output_markdown_path = self.reports_dir / "deep_hunt.md"
+        self.llm_usage_json_path = self.parsed_dir / "llm_usage.json"
         self.total_request_count = 0
         self.endpoint_validation = self._read_json(self.parsed_dir / "endpoint_validation.json")
         self.js_analysis = self._read_json(self.parsed_dir / "js_analysis.json")
         self.ranked_candidates = self._read_json(self.parsed_dir / "ranked_candidates.json")
+        self.llm_backend = current_llm_backend("signal_analysis")
+        self.llm_review_budget_used = 0
+        self.llm_review_budget_limit = 0
+        self.llm_signal_counts: dict[str, int] = {}
+        self.llm_stage_hashes: dict[str, dict[str, str]] = {}
+        self.llm_usage_events: list[dict] = []
 
     def run(
         self,
@@ -74,6 +86,14 @@ class DeepHunter:
             selected.append(json.loads(json.dumps(item)))
 
         investigated: list[dict] = []
+        llm_candidate_count = sum(
+            1
+            for item in selected[:max_signals]
+            if isinstance(item, dict)
+            and isinstance(item.get("evidence", {}), dict)
+            and item.get("evidence", {}).get("llm_candidate") is True
+        )
+        self.llm_review_budget_limit = max(2, min(10, max(len(selected[:max_signals]) * 2, llm_candidate_count * 3)))
         for signal in selected[:max_signals]:
             investigated.append(self._investigate_signal(signal))
 
@@ -85,11 +105,29 @@ class DeepHunter:
             escalated_count=sum(1 for item in investigated if item.get("status") == "escalated"),
             ruled_out_count=sum(1 for item in investigated if item.get("status") == "ruled_out"),
             total_request_count=self.total_request_count,
+            llm_backend=self.llm_backend,
+            llm_calls=len(self.llm_usage_events),
+            llm_cache_hits=sum(1 for item in self.llm_usage_events if item.get("cache_hit")),
+            llm_fallback_calls=sum(1 for item in self.llm_usage_events if item.get("fallback_used")),
+            llm_usage_json_path=str(self.llm_usage_json_path),
             deep_hunt_json_path=str(self.output_json_path),
             deep_hunt_markdown_path=str(self.output_markdown_path),
             signals=investigated,
         )
 
+        self.llm_usage_json_path.write_text(
+            json.dumps(
+                {
+                    "backend": self.llm_backend,
+                    "budget_limit": self.llm_review_budget_limit,
+                    "budget_used": self.llm_review_budget_used,
+                    "events": self.llm_usage_events,
+                },
+                indent=2,
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
         self.output_json_path.write_text(
             json.dumps(summary.to_dict(), indent=2, ensure_ascii=False),
             encoding="utf-8",
@@ -115,6 +153,7 @@ class DeepHunter:
         signal.setdefault("methods_tried", [])
         signal.setdefault("findings", [])
         signal.setdefault("llm_notes", [])
+        signal.setdefault("signal_id", f"{signal.get('signal_type', 'signal')}::{signal.get('endpoint', 'unknown')}")
         iteration_count = 0
         started_at = time.time()
 
@@ -156,8 +195,11 @@ class DeepHunter:
             else:
                 signal["status"] = "ruled_out"
 
-        report_section = generate_report_section(signal, signal.get("findings", []))
-        signal["report_section"] = self._safe_parse_json(report_section.text) or {}
+        report_section = self._maybe_generate_report_section(signal)
+        if report_section is not None:
+            signal["report_section"] = self._safe_parse_json(report_section.text) or {}
+        else:
+            signal["report_section"] = {}
         return signal
 
     def _should_continue_signal(self, signal: dict, iteration_count: int, started_at: float) -> bool:
@@ -201,7 +243,17 @@ class DeepHunter:
         return mapping.get(str(signal.get("signal_type", "")).upper(), ["context_from_ranked_candidates"])
 
     def _select_next_method(self, signal: dict, available_methods: list[str]) -> str:
-        response = analyze_signal(signal)
+        if not self._should_use_llm(signal, stage="method_selection"):
+            return available_methods[0] if available_methods else "stop"
+
+        response = self._run_signal_llm_review(
+            signal,
+            stage="method_selection",
+            available_methods=available_methods,
+        )
+        if response is None:
+            return available_methods[0] if available_methods else "stop"
+
         payload = self._safe_parse_json(response.text) or {}
         next_step = str(payload.get("next_step", "")).strip()
         if next_step in available_methods:
@@ -209,12 +261,124 @@ class DeepHunter:
         return available_methods[0] if available_methods else "stop"
 
     def _post_method_llm_review(self, signal: dict, available_methods: list[str]) -> None:
-        response = analyze_signal(signal)
+        if not self._should_use_llm(signal, stage="post_method_review"):
+            return
+
+        response = self._run_signal_llm_review(
+            signal,
+            stage="post_method_review",
+            available_methods=available_methods,
+        )
+        if response is None:
+            return
+
         payload = self._safe_parse_json(response.text) or {}
         if payload:
             signal.setdefault("llm_notes", []).append(payload)
             if payload.get("report_ready") is True and self._has_high_value_evidence(signal):
                 signal["confidence"] = max(float(signal.get("confidence", 0.0)), 0.9)
+
+    def _should_use_llm(self, signal: dict, stage: str) -> bool:
+        if self.llm_backend == "fallback" and stage != "report_section":
+            return False
+
+        priority = str(signal.get("priority", "")).upper()
+        confidence = float(signal.get("confidence", 0.0))
+        signal_type = str(signal.get("signal_type", "")).upper()
+        evidence = signal.get("evidence", {}) if isinstance(signal.get("evidence", {}), dict) else {}
+        llm_candidate = evidence.get("llm_candidate") is True
+        priority_match = evidence.get("policy_priority_category_match") is True
+
+        if self.llm_review_budget_used >= self.llm_review_budget_limit:
+            return False
+
+        if priority not in {"CRITICAL", "HIGH"} and not llm_candidate and confidence < 0.75:
+            return False
+
+        if signal_type == "INFO_DISCLOSURE" and priority not in {"CRITICAL", "HIGH"}:
+            if not (llm_candidate and priority_match and confidence >= 0.5):
+                return False
+
+        if stage in {"method_selection", "post_method_review"} and self.llm_signal_counts.get(self._signal_key(signal), 0) >= 2:
+            return False
+
+        if stage == "report_section" and not self._has_high_value_evidence(signal):
+            return False
+
+        if llm_candidate and confidence >= 0.5:
+            return True
+
+        return True
+
+    def _run_signal_llm_review(
+        self,
+        signal: dict,
+        stage: str,
+        available_methods: list[str] | None = None,
+    ):
+        if self._is_llm_stage_duplicate(signal, stage, available_methods):
+            return None
+
+        response = analyze_signal(signal, available_methods=available_methods)
+        self.llm_review_budget_used += 1
+        signal_key = self._signal_key(signal)
+        self.llm_signal_counts[signal_key] = self.llm_signal_counts.get(signal_key, 0) + 1
+        self._record_llm_usage(signal, stage, response)
+        self._remember_llm_stage_hash(signal, stage, available_methods)
+        return response
+
+    def _maybe_generate_report_section(self, signal: dict):
+        if not self._should_use_llm(signal, stage="report_section"):
+            return None
+        if self._is_llm_stage_duplicate(signal, "report_section", None):
+            return None
+
+        response = generate_report_section(signal, signal.get("findings", []))
+        self.llm_review_budget_used += 1
+        self._record_llm_usage(signal, "report_section", response)
+        self._remember_llm_stage_hash(signal, "report_section", None)
+        return response
+
+    def _signal_key(self, signal: dict) -> str:
+        return str(signal.get("signal_id") or f"{signal.get('signal_type', 'signal')}::{signal.get('endpoint', 'unknown')}")
+
+    def _llm_stage_hash(self, signal: dict, stage: str, available_methods: list[str] | None) -> str:
+        payload = {
+            "stage": stage,
+            "signal_type": signal.get("signal_type"),
+            "endpoint": signal.get("endpoint"),
+            "priority": signal.get("priority"),
+            "confidence": round(float(signal.get("confidence", 0.0)), 4),
+            "methods_tried": signal.get("methods_tried", [])[-6:],
+            "available_methods": available_methods[:6] if isinstance(available_methods, list) else [],
+            "findings": signal.get("findings", [])[-4:],
+        }
+        normalized = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+        return str(abs(hash(normalized)))
+
+    def _is_llm_stage_duplicate(self, signal: dict, stage: str, available_methods: list[str] | None) -> bool:
+        signal_key = self._signal_key(signal)
+        stage_hash = self._llm_stage_hash(signal, stage, available_methods)
+        return self.llm_stage_hashes.get(signal_key, {}).get(stage) == stage_hash
+
+    def _remember_llm_stage_hash(self, signal: dict, stage: str, available_methods: list[str] | None) -> None:
+        signal_key = self._signal_key(signal)
+        self.llm_stage_hashes.setdefault(signal_key, {})[stage] = self._llm_stage_hash(signal, stage, available_methods)
+
+    def _record_llm_usage(self, signal: dict, stage: str, response) -> None:
+        self.llm_usage_events.append(
+            {
+                "time": datetime.now(timezone.utc).isoformat(),
+                "signal_id": self._signal_key(signal),
+                "signal_type": signal.get("signal_type"),
+                "endpoint": signal.get("endpoint"),
+                "stage": stage,
+                "backend": getattr(response, "backend", "fallback"),
+                "model": getattr(response, "model", ""),
+                "fallback_used": bool(getattr(response, "fallback_used", False)),
+                "cache_hit": bool(getattr(response, "cache_hit", False)),
+            }
+        )
 
     def _method_context_from_ranked_candidates(self, signal: dict) -> dict:
         ranked_items = self.ranked_candidates.get("ranked_candidates", [])

@@ -37,17 +37,17 @@ SECTION_ORDER: list[tuple[str, list[str]]] = [
         ],
     ),
     (
-        "Local lab defaults",
-        [
-            "BB_JUICE_SHOP_USER_EMAIL",
-            "BB_JUICE_SHOP_USER_PASSWORD",
-        ],
-    ),
-    (
         "Real-program placeholders",
         [
             "BB_AIRTABLE_STAGING_ACCOUNT_EMAIL",
             "BB_AIRTABLE_STAGING_API_KEY",
+        ],
+    ),
+    (
+        "Local lab defaults",
+        [
+            "BB_JUICE_SHOP_USER_EMAIL",
+            "BB_JUICE_SHOP_USER_PASSWORD",
         ],
     ),
 ]
@@ -69,10 +69,10 @@ DEFAULT_VALUES = {
 }
 
 KEY_COMMENTS = {
-    "LLM_PROVIDER": "LLM backend selection: auto, openai, ollama, or fallback.",
+    "LLM_PROVIDER": "LLM backend selection: auto prefers local Ollama first, then OpenAI, then safe fallback.",
     "OPENAI_BASE_URL": "Official OpenAI API base URL. Leave as-is unless you use a compatible proxy.",
     "OPENAI_MODEL": "Recommended current hosted model for short structured signal triage loops.",
-    "OPENAI_API_KEY": "Optional OpenAI API key. If present, the agent prefers OpenAI before Ollama.",
+    "OPENAI_API_KEY": "Optional OpenAI API key. Used when explicitly selected or when Ollama is unavailable.",
     "OLLAMA_BASE_URL": "Optional local LLM endpoint. Leave as-is unless Ollama is running elsewhere.",
     "OLLAMA_MODEL": "Recommended local model for signal review. Safe fallback logic is used when Ollama is offline.",
     "BB_SKIP_BROWSER_SETUP": "Set to 1 to skip Playwright Chromium bootstrap.",
@@ -227,12 +227,12 @@ def main() -> int:
             print_line("WARN", f"{status.label} is not installed yet. The agent will keep using safe fallbacks where possible.")
 
     if shutil.which("ollama"):
-        print_line("OK", "Ollama detected. Local LLM-assisted signal review can be enabled with the default qwen3:8b setting.")
+        print_line("OK", "Ollama detected. Auto mode will prefer the local model for signal review with the default qwen3:8b setting.")
     else:
-        print_line("INFO", "Ollama not detected. If you add OPENAI_API_KEY, the agent can use the hosted OpenAI model instead.")
+        print_line("INFO", "Ollama not detected. If you add OPENAI_API_KEY, the agent can use the hosted OpenAI model; otherwise it stays on safe rule-based fallback.")
 
     print_line("INFO", "Manual step still required for real-program authenticated testing: populate your own API keys in `.env` when needed.")
-    print_line("INFO", "Next step: run `./bb.sh doctor` or `./bb.sh hunt --profile owasp-juice-shop-local http://localhost:3000`.")
+    print_line("INFO", "Next step: run `./bb.sh doctor`, `./bb.sh profile-readiness --profile airtable-staging-public-h1 --target https://staging.airtable.com`, or simply `./bb.sh` for the Airtable-safe autonomous flow.")
     return 0
 
 

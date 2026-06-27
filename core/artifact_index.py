@@ -45,6 +45,7 @@ class ArtifactIndexBuilder:
         session_compare = self._read_json(self.parsed_dir / "session_compare.json")
         signals = self._read_json(self.parsed_dir / "signals.json")
         deep_hunt = self._read_json(self.parsed_dir / "deep_hunt.json")
+        llm_usage = self._read_json(self.parsed_dir / "llm_usage.json")
         review_queue = self._read_json(self.parsed_dir / "review_queue.json")
         browser_evidence = self._read_json(self.parsed_dir / "browser_evidence.json")
         evidence_pack = self._read_json(self.evidence_dir / "evidence_pack.json")
@@ -102,6 +103,7 @@ class ArtifactIndexBuilder:
                 self.parsed_dir / "session_compare.json",
                 self.parsed_dir / "signals.json",
                 self.parsed_dir / "deep_hunt.json",
+                self.parsed_dir / "llm_usage.json",
                 self.parsed_dir / "agent_summary.json",
                 self.parsed_dir / "browser_evidence.json",
                 self.parsed_dir / "normalized_findings.json",
@@ -143,6 +145,7 @@ class ArtifactIndexBuilder:
             session_compare=session_compare,
             signals=signals,
             deep_hunt=deep_hunt,
+            llm_usage=llm_usage,
             review_queue=review_queue,
             evidence_pack=evidence_pack,
             browser_evidence=browser_evidence,
@@ -171,6 +174,7 @@ class ArtifactIndexBuilder:
         session_compare: dict,
         signals: dict,
         deep_hunt: dict,
+        llm_usage: dict,
         review_queue: dict,
         evidence_pack: dict,
         browser_evidence: dict,
@@ -235,6 +239,10 @@ class ArtifactIndexBuilder:
         if deep_hunt:
             lines.append(f"- **Deep Hunt Investigated:** `{deep_hunt.get('investigated_count', 0)}`")
         lines.append(f"- **Deep Hunt Escalated:** `{deep_hunt.get('escalated_count', 0)}`")
+        if llm_usage:
+            lines.append(f"- **LLM Backend:** `{llm_usage.get('backend', 'unknown')}`")
+            lines.append(f"- **LLM Budget Used:** `{llm_usage.get('budget_used', 0)}/{llm_usage.get('budget_limit', 0)}`")
+            lines.append(f"- **LLM Calls:** `{len(llm_usage.get('events', []))}`")
         agent_summary = self._read_json(self.parsed_dir / "agent_summary.json")
         if agent_summary:
             lines.append(f"- **Autonomous Agent Cycles:** `{agent_summary.get('cycle_count', 0)}`")
@@ -258,6 +266,8 @@ class ArtifactIndexBuilder:
         lines.append(f"- **Evidence Pack Items:** `{evidence_pack.get('total_items', 0)}`")
         lines.append(f"- **Final Report Draft Items:** `{final_report.get('report_draft_items', 0)}`")
         lines.append(f"- **Deep Hunt Ruled Out:** `{deep_hunt.get('ruled_out_count', 0)}`")
+        lines.append(f"- **LLM Cache Hits:** `{sum(1 for item in llm_usage.get('events', []) if isinstance(item, dict) and item.get('cache_hit'))}`")
+        lines.append(f"- **LLM Fallback Calls:** `{sum(1 for item in llm_usage.get('events', []) if isinstance(item, dict) and item.get('fallback_used'))}`")
         lines.append("")
         lines.append("## Report Artifacts")
         lines.append("")
