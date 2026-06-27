@@ -23,6 +23,9 @@ class AuthenticatedCrawlSummary:
     authenticated_discovered_count: int
     authenticated_only_count: int
     authenticated_only_urls: list[str]
+    authenticated_only_interesting_count: int
+    authenticated_only_static_count: int
+    authenticated_only_interesting_urls: list[str]
     baseline_json_path: str
     authenticated_json_path: str
     comparison_json_path: str
@@ -71,6 +74,8 @@ class AuthenticatedCrawlRunner:
         baseline_urls = set(baseline.discovered_urls)
         authenticated_urls = set(authenticated.discovered_urls)
         authenticated_only_urls = sorted(authenticated_urls - baseline_urls)
+        interesting_only_urls = [url for url in authenticated_only_urls if self._is_interesting_delta(url)]
+        static_only_count = sum(1 for url in authenticated_only_urls if self._is_static_asset_url(url))
 
         summary = AuthenticatedCrawlSummary(
             target=start_url,
@@ -83,6 +88,9 @@ class AuthenticatedCrawlRunner:
             authenticated_discovered_count=len(authenticated.discovered_urls),
             authenticated_only_count=len(authenticated_only_urls),
             authenticated_only_urls=authenticated_only_urls,
+            authenticated_only_interesting_count=len(interesting_only_urls),
+            authenticated_only_static_count=static_only_count,
+            authenticated_only_interesting_urls=interesting_only_urls,
             baseline_json_path=str(self.parsed_dir / "crawl_result.json"),
             authenticated_json_path=str(self.parsed_dir / "authenticated_crawl_result.json"),
             comparison_json_path=str(self.summary_json_path),
@@ -135,6 +143,8 @@ class AuthenticatedCrawlRunner:
         lines.append(f"- **Authenticated Visited:** `{summary.authenticated_visited_count}`")
         lines.append(f"- **Authenticated Discovered:** `{summary.authenticated_discovered_count}`")
         lines.append(f"- **Authenticated-Only URLs:** `{summary.authenticated_only_count}`")
+        lines.append(f"- **Interesting Authenticated-Only URLs:** `{summary.authenticated_only_interesting_count}`")
+        lines.append(f"- **Static Asset Authenticated-Only URLs:** `{summary.authenticated_only_static_count}`")
         lines.append("")
         lines.append("## Session")
         lines.append("")
@@ -147,7 +157,19 @@ class AuthenticatedCrawlRunner:
         lines.append("## Crawl Comparison")
         lines.append("")
 
+        if summary.authenticated_only_interesting_urls:
+            lines.append("Interesting authenticated-only URLs:")
+            lines.append("")
+            for url in summary.authenticated_only_interesting_urls[:25]:
+                lines.append(f"- `{url}`")
+            lines.append("")
+        elif summary.authenticated_only_urls:
+            lines.append("No obviously high-value authenticated-only URLs were discovered in this crawl seed.")
+            lines.append("")
+
         if summary.authenticated_only_urls:
+            lines.append("All authenticated-only URLs observed:")
+            lines.append("")
             for url in summary.authenticated_only_urls[:25]:
                 lines.append(f"- `{url}`")
         else:
@@ -166,7 +188,39 @@ class AuthenticatedCrawlRunner:
         lines.append("- Use only lab or explicitly authorized test accounts.")
         lines.append("- Keep credentials and raw tokens out of reports.")
         lines.append("- Treat differential behavior as a review lead, not proof of access control issues.")
+        lines.append("- Static asset drift alone is usually low-value unless it supports a stronger auth or cache boundary issue.")
         lines.append("- Session-aware endpoint comparison should still happen as a separate validation step.")
         lines.append("")
 
         return "\n".join(lines)
+
+    def _is_static_asset_url(self, url: str) -> bool:
+        lowered = url.lower().split("?", 1)[0]
+        return lowered.endswith(
+            (
+                ".css",
+                ".js",
+                ".svg",
+                ".png",
+                ".jpg",
+                ".jpeg",
+                ".gif",
+                ".webp",
+                ".woff",
+                ".woff2",
+                ".ttf",
+                ".ico",
+                ".map",
+            )
+        )
+
+    def _is_interesting_delta(self, url: str) -> bool:
+        if self._is_static_asset_url(url):
+            return False
+
+        lowered = url.lower()
+        for keyword in ("/api/", "/graphql", "/auth", "/session", "/account", "/workspace", "/base", "/record", "/admin"):
+            if keyword in lowered:
+                return True
+
+        return lowered.rstrip("/").count("/") <= 3 or "/contact" in lowered or "/developers" in lowered

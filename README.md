@@ -47,8 +47,13 @@ Common direct commands:
 ./bb.sh setup
 ./bb.sh doctor
 ./bb.sh profiles
-./bb.sh config --profile owasp-juice-shop-local
-./bb.sh quick-scan --profile owasp-juice-shop-local http://localhost:3000
+./bb.sh config --profile airtable-staging-public-h1
+./bb.sh profile-readiness --profile airtable-staging-public-h1 --target https://staging.airtable.com
+./bb.sh surface-recon --profile airtable-staging-public-h1 \
+  https://staging.airtable.com \
+  https://staging.airtable.com/login \
+  https://api-staging.airtable.com
+./bb.sh hunt --profile airtable-staging-public-h1 https://staging.airtable.com
 ```
 
 Or bootstrap only:
@@ -94,8 +99,16 @@ python app/main.py program-onboard \
 Then review readiness before any network action:
 
 ```bash
-python app/main.py profile-readiness --profile owasp-juice-shop-local --target http://localhost:3000
+python app/main.py profile-readiness --profile airtable-staging-public-h1 --target https://staging.airtable.com
 ```
+
+## Active Test Profile
+
+The default live profile is now `airtable-staging-public-h1`.
+
+- `./bb.sh` prefers the Airtable staging profile and runs the bounded autonomous authorized flow.
+- `quick-scan` and `hunt` keep their lab behavior for lab profiles, but automatically switch to the passive Airtable-safe surface recon path for non-lab authorized profiles.
+- Browser and authenticated comparisons remain manual-approval gated.
 
 ## Notes
 

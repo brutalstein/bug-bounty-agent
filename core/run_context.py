@@ -198,13 +198,13 @@ def create_run_context(
 
 if __name__ == "__main__":
     ctx = create_run_context(
-        target_name="owasp-juice-shop-local",
-        target_url="http://localhost:3000",
-        mode="lab",
-        profile_name="owasp-juice-shop-local",
-        program_name="OWASP Juice Shop Local Lab",
-        program_url="https://owasp.org/www-project-juice-shop/",
-        authorization_kind="local_lab",
+        target_name="airtable-staging-public-h1",
+        target_url="https://staging.airtable.com",
+        mode="authorized",
+        profile_name="airtable-staging-public-h1",
+        program_name="Airtable HackerOne Bug Bounty",
+        program_url="https://hackerone.com/airtable",
+        authorization_kind="public_bug_bounty_policy",
         authorization_confirmed=True,
     )
 

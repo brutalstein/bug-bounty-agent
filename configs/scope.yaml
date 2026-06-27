@@ -1,9 +1,9 @@
 project:
   name: "bug-bounty-agent"
-  mode: "lab"
+  mode: "authorized"
   description: "Authorized bug bounty automation assistant"
 
-active_profile: "owasp-juice-shop-local"
+active_profile: "airtable-staging-public-h1"
 
 profiles:
   owasp-juice-shop-local:
@@ -312,7 +312,10 @@ profiles:
         auth_header_name: "Authorization"
         auth_header_prefix: "Bearer"
         role_hint: "api_key"
+        probe_urls:
+          - "https://api-staging.airtable.com/v0/meta/bases"
         notes:
           - "Generate the API key from your own authorized staging account at https://staging.airtable.com/account."
           - "Use endpointUrl https://api-staging.airtable.com when testing Airtable Web API clients."
+          - "Read-only probe seed inferred from the official Airtable Web API `GET /v0/meta/bases` documentation and adapted to the in-scope staging endpointUrl."
           - "Only run read-only requests with self-owned test data and explicit manual approval."

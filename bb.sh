@@ -8,6 +8,9 @@ REQ_HASH_FILE="$VENV_DIR/.bb_requirements.sha256"
 ENV_FILE="$ROOT_DIR/.env"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 PLAYWRIGHT_SKIP="${BB_SKIP_BROWSER_SETUP:-0}"
+CLI_QUIET=0
+DEFAULT_PROFILE=""
+DEFAULT_COMMAND=""
 
 supports_color() {
   [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]
@@ -29,6 +32,9 @@ icon_fail="✕"
 icon_step="➜"
 
 say_banner() {
+  if [[ "$CLI_QUIET" == "1" ]]; then
+    return
+  fi
   local title="BUG BOUNTY AGENT"
   local subtitle="safe local bootstrap + colorful CLI launcher"
   printf "%s\n" "$(color "1;38;5;39" "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")"
@@ -38,10 +44,16 @@ say_banner() {
 }
 
 say_info() {
+  if [[ "$CLI_QUIET" == "1" ]]; then
+    return
+  fi
   printf "%s %s %s\n" "$(color "1;38;5;45" "$icon_info")" "$(color "1;38;5;45" "INFO")" "$*"
 }
 
 say_ok() {
+  if [[ "$CLI_QUIET" == "1" ]]; then
+    return
+  fi
   printf "%s %s %s\n" "$(color "1;38;5;42" "$icon_ok")" "$(color "1;38;5;42" "OK")" "$*"
 }
 
@@ -50,6 +62,9 @@ say_fail() {
 }
 
 say_step() {
+  if [[ "$CLI_QUIET" == "1" ]]; then
+    return
+  fi
   printf "%s %s %s\n" "$(color "1;38;5;213" "$icon_step")" "$(color "1;38;5;213" "STEP")" "$*"
 }
 
@@ -124,6 +139,26 @@ install_requirements_if_needed() {
   fi
 }
 
+needs_browser_runtime() {
+  case "${1:-}" in
+    browser-surface-compare|browser-evidence-run)
+      return 0
+      ;;
+    surface-recon)
+      shift || true
+      for arg in "$@"; do
+        if [[ "$arg" == "--with-browser" ]]; then
+          return 0
+        fi
+      done
+      return 1
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
 ensure_browser_runtime() {
   if [[ "$PLAYWRIGHT_SKIP" == "1" ]]; then
     say_info "Skipping browser runtime setup because BB_SKIP_BROWSER_SETUP=1"
@@ -155,29 +190,79 @@ show_help_hint() {
 Examples:
   ./bb.sh setup
   ./bb.sh
+  ./bb.sh airtable
+  ./bb.sh lab
   ./bb.sh interactive
   ./bb.sh doctor
+  ./bb.sh self-test
   ./bb.sh profiles
   ./bb.sh onboard --program demo-program --policy-url https://example.com/policy --base-url https://target.example.com
-  ./bb.sh config --profile owasp-juice-shop-local
-  ./bb.sh lab-up --profile owasp-juice-shop-local
-  ./bb.sh quick-scan --profile owasp-juice-shop-local http://localhost:3000
-  ./bb.sh hunt --profile owasp-juice-shop-local http://localhost:3000
+  ./bb.sh config --profile airtable-staging-public-h1
+  ./bb.sh profile-readiness --profile airtable-staging-public-h1 --target https://staging.airtable.com
+  ./bb.sh surface-recon --profile airtable-staging-public-h1 https://staging.airtable.com https://staging.airtable.com/login https://api-staging.airtable.com
+  ./bb.sh hunt --profile airtable-staging-public-h1 https://staging.airtable.com
   ./bb.sh signals-run runs/<run-id>
   ./bb.sh deep-hunt runs/<run-id>
   ./bb.sh last-run
-  ./bb.sh authenticated-crawl --profile owasp-juice-shop-local http://localhost:3000 --manual-approval
-  ./bb.sh session-compare-run runs/<run-id> --manual-approval
+  ./bb.sh browser-surface-compare --profile airtable-staging-public-h1 --manual-approval https://staging.airtable.com https://staging.airtable.com/login https://staging.airtable.com/developers/web/api/introduction
+  ./bb.sh authenticated-crawl --profile airtable-staging-public-h1 https://staging.airtable.com --session-profile airtable-staging-api-key --manual-approval
+  ./bb.sh session-compare-run runs/<run-id> --session-profile airtable-staging-api-key --manual-approval
 
 Optional environment flags:
   BB_SKIP_BROWSER_SETUP=1   Skip Playwright Chromium bootstrap
   BB_VERBOSE_LOGS=1         Show file logger output in terminal
   BB_CLI_MINIMAL=1          Suppress the Python CLI banner
+
+Shell flags:
+  --quiet                   Reduce shell bootstrap output
+  --verbose                 Mirror more logger output in terminal
+  --no-browser-setup        Skip Playwright bootstrap for this invocation
+  --profile <name>          Override the default profile for no-arg or interactive runs
+  --lab                     Shortcut for local lab interactive mode
 EOF
 }
 
 main() {
   local setup_requested=0
+  local cli_args=()
+
+  while [[ "$#" -gt 0 ]]; do
+    case "$1" in
+      --quiet)
+        CLI_QUIET=1
+        export BB_CLI_MINIMAL=1
+        shift
+        ;;
+      --verbose)
+        export BB_VERBOSE_LOGS=1
+        shift
+        ;;
+      --no-browser-setup)
+        PLAYWRIGHT_SKIP=1
+        export BB_SKIP_BROWSER_SETUP=1
+        shift
+        ;;
+      --profile)
+        if [[ $# -lt 2 ]]; then
+          say_fail "--profile requires a value"
+          exit 1
+        fi
+        DEFAULT_PROFILE="$2"
+        shift 2
+        ;;
+      --lab)
+        DEFAULT_COMMAND="lab"
+        shift
+        ;;
+      *)
+        cli_args+=("$1")
+        shift
+        ;;
+    esac
+  done
+
+  set -- "${cli_args[@]}"
+
   if [[ "${1:-}" == "setup" ]]; then
     setup_requested=1
     shift || true
@@ -190,10 +275,16 @@ main() {
   fi
   ensure_env_file
   load_env_file
+  PLAYWRIGHT_SKIP="${BB_SKIP_BROWSER_SETUP:-$PLAYWRIGHT_SKIP}"
   ensure_venv
   activate_venv
   install_requirements_if_needed
-  ensure_browser_runtime
+
+  if needs_browser_runtime "${1:-}" "${@:2}"; then
+    ensure_browser_runtime
+  else
+    say_info "Skipping Playwright bootstrap for this command path"
+  fi
 
   if [[ "$setup_requested" -eq 1 && "$#" -eq 0 ]]; then
     say_info "Setup finished. Running doctor for verification."
@@ -206,10 +297,34 @@ main() {
     return 0
   fi
 
+  if [[ "${1:-}" == "airtable" ]]; then
+    shift || true
+    run_cli interactive --profile airtable-staging-public-h1 "$@"
+    return $?
+  fi
+
+  if [[ "${1:-}" == "lab" || "${DEFAULT_COMMAND:-}" == "lab" ]]; then
+    if [[ "${1:-}" == "lab" ]]; then
+      shift || true
+    fi
+    run_cli interactive --profile owasp-juice-shop-local "$@"
+    return $?
+  fi
+
   if [[ "$#" -eq 0 ]]; then
     say_info "Environment is ready. Launching the autonomous agent."
-    run_cli interactive
+    if [[ -n "$DEFAULT_PROFILE" ]]; then
+      run_cli interactive --profile "$DEFAULT_PROFILE"
+    else
+      run_cli interactive --profile airtable-staging-public-h1
+    fi
     return 0
+  fi
+
+  if [[ -n "$DEFAULT_PROFILE" && "${1:-}" == "interactive" ]]; then
+    shift || true
+    run_cli interactive --profile "$DEFAULT_PROFILE" "$@"
+    return $?
   fi
 
   run_cli "$@"

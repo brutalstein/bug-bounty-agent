@@ -65,6 +65,7 @@ class SessionProfileConfig:
     auth_header_name: str
     auth_header_prefix: str
     role_hint: str
+    probe_urls: list[str]
     notes: list[str]
 
 
@@ -339,6 +340,7 @@ class ScopeManager:
                 auth_header_name=str(item.get("auth_header_name", "Authorization")).strip(),
                 auth_header_prefix=str(item.get("auth_header_prefix", "Bearer")).strip(),
                 role_hint=str(item.get("role_hint", "")).strip(),
+                probe_urls=[str(url).strip() for url in item.get("probe_urls", []) if str(url).strip()],
                 notes=[str(note) for note in item.get("notes", [])],
             )
 
@@ -443,6 +445,7 @@ class ScopeManager:
                     "login_url": profile.login_url,
                     "token_env": profile.token_env,
                     "role_hint": profile.role_hint,
+                    "probe_url_count": len(profile.probe_urls),
                 }
             )
 

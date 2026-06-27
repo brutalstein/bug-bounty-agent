@@ -1,5 +1,7 @@
 # PROJECT_CONTEXT.md
 
+> Active operator note as of June 27, 2026: the repository's default live profile is now `airtable-staging-public-h1`. Earlier OWASP Juice Shop sections remain valuable as historical lab-build context, but Airtable staging is the current real-program testing baseline.
+
 ## Project Name
 
 Private Authorized Bug Bounty Automation Assistant
@@ -17,7 +19,7 @@ WSL Ubuntu
 Python virtual environment
 Docker
 ProjectDiscovery tools
-OWASP Juice Shop lab
+Airtable staging bug bounty profile
 ```
 
 The project is private and personal. It is not currently intended to be open source.

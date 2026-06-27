@@ -1,5 +1,7 @@
 # AGENTS.md
 
+> Active operator note as of June 27, 2026: the repository's current live default profile is `airtable-staging-public-h1`. Historical OWASP Juice Shop references below remain as legacy lab context only and should not be treated as the primary test flow unless the operator explicitly switches back to that profile.
+
 ## Project Identity
 
 This repository is a private, local-first, authorized bug bounty automation assistant.
@@ -76,10 +78,14 @@ When implementing changes:
 
 ## Current Live Test Target
 
-The primary lab target is OWASP Juice Shop running locally:
+The current live default target is the authorized Airtable staging profile:
 
 ```bash
-docker run --rm -p 3000:3000 bkimminich/juice-shop
+python app/main.py profile-readiness --profile airtable-staging-public-h1 --target https://staging.airtable.com
+python app/main.py surface-recon --profile airtable-staging-public-h1 \
+  https://staging.airtable.com \
+  https://staging.airtable.com/login \
+  https://api-staging.airtable.com
 ```
 
 Project test commands:
@@ -89,13 +95,15 @@ cd ~/bug-bounty-agent
 source .venv/bin/activate
 
 python app/main.py doctor
-python app/main.py quick-scan http://localhost:3000
-python app/main.py quick-scan https://example.com
+python app/main.py profile-readiness --profile airtable-staging-public-h1 --target https://staging.airtable.com
+python app/main.py surface-recon --profile airtable-staging-public-h1 https://staging.airtable.com https://staging.airtable.com/login https://api-staging.airtable.com
+python app/main.py scope-check --profile airtable-staging-public-h1 https://example.com
 ```
 
 Expected safety behavior:
 
-* `http://localhost:3000` should run successfully.
+* `https://staging.airtable.com` readiness should pass for safe read-only actions.
+* `surface-recon` against the listed Airtable staging surfaces should run successfully.
 * `https://example.com` must be blocked as out of scope.
 
 ---

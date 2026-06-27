@@ -100,6 +100,7 @@ class SessionCompareRunner:
     ) -> SessionCompareSummary:
         endpoint_validation = self._read_json(self.parsed_dir / "endpoint_validation.json")
         candidates = self._select_candidates(
+            session=session,
             endpoint_validation=endpoint_validation,
             max_endpoints=max_endpoints,
             include_only_interesting=include_only_interesting,
@@ -170,6 +171,7 @@ class SessionCompareRunner:
 
     def _select_candidates(
         self,
+        session: AuthenticatedSession,
         endpoint_validation: dict,
         max_endpoints: int,
         include_only_interesting: bool,
@@ -185,6 +187,9 @@ class SessionCompareRunner:
                 self._add_candidate(candidates, seen, result)
 
         for result in self._seeded_surface_targets():
+            self._add_candidate(candidates, seen, result)
+
+        for result in self._session_probe_targets(session):
             self._add_candidate(candidates, seen, result)
 
         ranked = sorted(
@@ -203,6 +208,28 @@ class SessionCompareRunner:
             filtered = ranked
 
         return filtered[:max_endpoints]
+
+    def _session_probe_targets(self, session: AuthenticatedSession) -> list[dict]:
+        seeded: list[dict] = []
+        profile = self.scope.get_session_profile(session.artifact.session_profile_name)
+
+        for url in profile.probe_urls:
+            normalized = str(url).strip()
+            if not normalized or not self.scope.is_target_allowed(normalized):
+                continue
+            seeded.append(
+                {
+                    "url": normalized,
+                    "source": "session_profile_probe_url",
+                    "category": self.validator._classify_endpoint(normalized),
+                    "interesting": True,
+                    "accessible": True,
+                    "auth_likely_required": True,
+                    "exposure_likely": False,
+                }
+            )
+
+        return seeded
 
     def _seeded_surface_targets(self) -> list[dict]:
         seeded: list[dict] = []
@@ -247,6 +274,24 @@ class SessionCompareRunner:
                         "interesting": self._matches_focus_keyword(url),
                         "accessible": True,
                         "auth_likely_required": False,
+                        "exposure_likely": False,
+                    }
+                )
+
+        authenticated_crawl = self._read_json_any(self.parsed_dir / "authenticated_crawl_summary.json")
+        if isinstance(authenticated_crawl, dict):
+            for url in authenticated_crawl.get("authenticated_only_interesting_urls", []):
+                normalized = str(url).strip()
+                if not normalized or not self.scope.is_target_allowed(normalized):
+                    continue
+                seeded.append(
+                    {
+                        "url": normalized,
+                        "source": "authenticated_crawl_interesting_delta",
+                        "category": self.validator._classify_endpoint(normalized),
+                        "interesting": True,
+                        "accessible": True,
+                        "auth_likely_required": True,
                         "exposure_likely": False,
                     }
                 )

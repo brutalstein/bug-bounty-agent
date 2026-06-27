@@ -26,6 +26,9 @@ SYMBOLS = {
     "fail": "✕",
     "warn": "▲",
     "step": "➜",
+    "blocked": "■",
+    "review": "◆",
+    "artifact": "◈",
 }
 
 SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
@@ -71,6 +74,9 @@ def print_status(kind: str, message: str, stream=None) -> None:
         "fail": ("red", SYMBOLS["fail"], "FAIL"),
         "warn": ("yellow", SYMBOLS["warn"], "WARN"),
         "step": ("magenta", SYMBOLS["step"], "STEP"),
+        "blocked": ("red", SYMBOLS["blocked"], "BLOCKED"),
+        "review": ("yellow", SYMBOLS["review"], "REVIEW"),
+        "artifact": ("blue", SYMBOLS["artifact"], "ARTIFACT"),
     }
 
     color, symbol, label = token_map.get(kind, ("muted", "•", "LOG"))

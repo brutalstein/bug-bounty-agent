@@ -9,6 +9,7 @@ investigation cycles with bounded budgets, and produces a compact agent summary.
 """
 
 from dataclasses import dataclass, asdict
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import urljoin
@@ -84,11 +85,30 @@ class AutonomousAgentSummary:
         return asdict(self)
 
 
+@dataclass
+class AgentStateTraceEntry:
+    state_name: str
+    started_at: str
+    finished_at: str
+    status: str
+    reason: str
+    safety_gates_checked: list[str]
+    request_budget_used: int
+    artifact_inputs: list[str]
+    artifact_outputs: list[str]
+    errors: list[str]
+    warnings: list[str]
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
 class AutonomousAgent:
     def __init__(self, project_root: str | Path):
         self.project_root = Path(project_root)
         self.python_executable = sys.executable
         self.http_client = SafeHttpClient(timeout_seconds=5)
+        self.state_trace: list[AgentStateTraceEntry] = []
 
     def run(
         self,
@@ -97,25 +117,85 @@ class AutonomousAgent:
         max_cycles: int = 2,
     ) -> AutonomousAgentSummary:
         config_path = self.project_root / PROFILE_CONFIG_PATH
+        self._record_state(
+            state_name="BOOTSTRAP",
+            status="completed",
+            reason="Autonomous Airtable operator bootstrap started.",
+            safety_gates_checked=["config_path_resolved"],
+            artifact_inputs=[str(config_path)],
+        )
         candidates = self.inspect_profiles(config_path)
         self._print_profile_matrix(candidates)
+        self._record_state(
+            state_name="PREFLIGHT",
+            status="completed",
+            reason="Profile readiness matrix collected.",
+            safety_gates_checked=["profile_readiness_snapshot", "authorization_presence"],
+            artifact_outputs=["profile_readiness_snapshot"],
+            warnings=[f"{item.profile_name}:warnings={item.warning_count}" for item in candidates if item.warning_count],
+        )
 
         selected = self.select_profile(candidates, preferred_profile=preferred_profile)
         if selected is None:
+            self._record_state(
+                state_name="PROFILE_SELECT",
+                status="blocked",
+                reason="No authorized profile was ready enough for autonomous execution.",
+                safety_gates_checked=["active_profile_resolution", "authorization_confirmed", "reachability"],
+                errors=["no_ready_profile"],
+            )
             raise RuntimeError(
                 "No authorized profile is ready enough for autonomous execution. "
                 "Run `./bb.sh profiles`, `./bb.sh config --profile <name>`, or `./bb.sh profile-readiness --profile <name>` first."
             )
+        self._record_state(
+            state_name="PROFILE_SELECT",
+            status="completed",
+            reason=f"Selected profile `{selected.profile_name}`.",
+            safety_gates_checked=["active_profile_resolution", "authorization_confirmed", "reachability"],
+            artifact_outputs=[selected.profile_name],
+            warnings=[f"{selected.warning_count} readiness warning(s) remain."] if selected.warning_count else [],
+        )
 
         scope = ScopeManager(config_path, profile_name=selected.profile_name)
         selected_target = target or scope.config.base_url
         self._prepare_profile(scope, selected)
+        self._record_state(
+            state_name="POLICY_VERIFY",
+            status="completed",
+            reason="Selected profile policy and safety restrictions verified.",
+            safety_gates_checked=[
+                "authorization_confirmed",
+                "allowed_http_methods",
+                "disallowed_actions",
+                "destructive_actions_disabled",
+                "rate_limit_present",
+            ],
+            artifact_outputs=[
+                scope.config.profile_name,
+                scope.config.policy.program_url,
+            ],
+            warnings=[
+                "browser_actions_require_manual_approval"
+                if scope.requires_manual_approval("browser_screenshots")
+                else ""
+            ],
+        )
 
         derived_targets = self.derive_targets(scope, selected_target)
         print_status("info", f"Selected profile: {selected.profile_name}")
         print_status("info", f"Selected target: {selected_target}")
         if derived_targets:
             print_status("info", f"Derived high-value surfaces: {derived_targets[:4]}")
+        self._print_execution_overview(scope, selected_target, derived_targets)
+        self._record_state(
+            state_name="TARGET_DERIVE",
+            status="completed",
+            reason="Derived safe in-scope surfaces from policy focus areas and recipes.",
+            safety_gates_checked=["scope_explain", "allowed_hosts", "allowed_url_patterns"],
+            artifact_inputs=[selected_target],
+            artifact_outputs=derived_targets[:6],
+        )
 
         cycle_plans = self.build_cycle_plans(
             scope=scope,
@@ -124,6 +204,13 @@ class AutonomousAgent:
             max_cycles=max_cycles,
         )
         if not cycle_plans:
+            self._record_state(
+                state_name="PASSIVE_RECON",
+                status="blocked",
+                reason="No safe autonomous cycle could be planned for the selected profile.",
+                safety_gates_checked=["cycle_plan_policy_gate"],
+                errors=["no_safe_cycle_plan"],
+            )
             raise RuntimeError("No safe autonomous cycle could be planned for the selected profile.")
 
         evaluations: list[RunEvaluation] = []
@@ -131,6 +218,13 @@ class AutonomousAgent:
 
         for index, plan in enumerate(cycle_plans, start=1):
             print_status("step", f"Cycle {index}/{len(cycle_plans)}: {plan['label']}")
+            self._record_state(
+                state_name="PASSIVE_RECON" if plan["flow_name"] == "surface-recon" else "SAFE_DEEP_HUNT",
+                status="running",
+                reason=f"Starting `{plan['label']}`.",
+                safety_gates_checked=["scope_validated", "authorization_confirmed", "policy_gated_flow"],
+                artifact_inputs=plan["argv"],
+            )
             previous_runs = {str(path) for path in self.list_run_dirs()}
             self.run_cli_command(plan["argv"], label=plan["label"])
             run_dir = self.find_new_run_dir(previous_runs)
@@ -149,6 +243,7 @@ class AutonomousAgent:
             evaluations.append(evaluation)
             self._print_run_evaluation(evaluation)
             self.write_agent_summary(run_dir, evaluations, selected.profile_name, selected_target)
+            self.write_agent_state_trace(run_dir)
 
             if evaluation.potential_high_signal:
                 stop_reason = evaluation.stop_reason
@@ -156,6 +251,17 @@ class AutonomousAgent:
 
         if evaluations and not evaluations[-1].potential_high_signal:
             stop_reason = evaluations[-1].stop_reason
+
+        final_run_dir = Path(evaluations[-1].run_dir) if evaluations else None
+        self._record_state(
+            state_name="STOP",
+            status="completed",
+            reason=stop_reason,
+            safety_gates_checked=["safe_budget_stop", "human_review_required"],
+            artifact_outputs=[str(final_run_dir)] if final_run_dir is not None else [],
+        )
+        if final_run_dir is not None:
+            self.write_agent_state_trace(final_run_dir)
 
         return AutonomousAgentSummary(
             selected_profile=selected.profile_name,
@@ -495,6 +601,36 @@ class AutonomousAgent:
             lines.append("")
         report_path.write_text("\n".join(lines), encoding="utf-8")
 
+    def write_agent_state_trace(self, run_dir: Path) -> None:
+        parsed_path = run_dir / "parsed" / "agent_state_trace.json"
+        report_path = run_dir / "reports" / "agent_state_trace.md"
+        payload = [entry.to_dict() for entry in self.state_trace]
+        parsed_path.write_text(
+            json.dumps(payload, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+        lines: list[str] = []
+        lines.append("# Agent State Trace")
+        lines.append("")
+        lines.append("> Autonomous state-machine style trace for the default Airtable operator flow.")
+        lines.append("")
+        for entry in self.state_trace:
+            lines.append(f"## {entry.state_name}")
+            lines.append("")
+            lines.append(f"- **Status:** `{entry.status}`")
+            lines.append(f"- **Reason:** `{entry.reason}`")
+            lines.append(f"- **Started At:** `{entry.started_at}`")
+            lines.append(f"- **Finished At:** `{entry.finished_at}`")
+            lines.append(f"- **Safety Gates Checked:** `{entry.safety_gates_checked}`")
+            lines.append(f"- **Request Budget Used:** `{entry.request_budget_used}`")
+            lines.append(f"- **Artifact Inputs:** `{entry.artifact_inputs}`")
+            lines.append(f"- **Artifact Outputs:** `{entry.artifact_outputs}`")
+            lines.append(f"- **Warnings:** `{entry.warnings}`")
+            lines.append(f"- **Errors:** `{entry.errors}`")
+            lines.append("")
+        report_path.write_text("\n".join(lines), encoding="utf-8")
+
     def list_run_dirs(self) -> list[Path]:
         runs_dir = self.project_root / "runs"
         if not runs_dir.exists():
@@ -571,6 +707,54 @@ class AutonomousAgent:
                 f" warnings={item.warning_count}"
                 f" auto_start={auto_start}"
             )
+
+    def _print_execution_overview(self, scope: ScopeManager, selected_target: str, derived_targets: list[str]) -> None:
+        print_status("review", f"Program: {scope.config.policy.program_name}")
+        print_status("review", f"Allowed methods: {scope.config.policy.allowed_http_methods}")
+        print_status("review", f"Rate limit: {scope.config.rules.max_requests_per_minute} requests/minute")
+        print_status("review", f"Policy restrictions: {scope.config.policy.disallowed_actions}")
+        print_status(
+            "review",
+            "Planned phases: PREFLIGHT -> POLICY_VERIFY -> TARGET_DERIVE -> PASSIVE_RECON -> SIGNAL_DETECT -> SAFE_DEEP_HUNT -> EVIDENCE_PACK -> REVIEW_QUEUE -> REPORT_DRAFT -> DASHBOARD -> STOP",
+        )
+        if scope.requires_manual_approval("browser_screenshots") or scope.requires_manual_approval("authenticated_crawl"):
+            print_status(
+                "blocked",
+                "Manual-approval phases such as browser comparison and authenticated testing remain skipped in the default no-arg operator flow.",
+            )
+        print_status("artifact", f"Primary target: {selected_target}")
+        if derived_targets:
+            print_status("artifact", f"Initial derived targets: {derived_targets[:3]}")
+
+    def _record_state(
+        self,
+        state_name: str,
+        status: str,
+        reason: str,
+        safety_gates_checked: list[str] | None = None,
+        request_budget_used: int = 0,
+        artifact_inputs: list[str] | None = None,
+        artifact_outputs: list[str] | None = None,
+        errors: list[str] | None = None,
+        warnings: list[str] | None = None,
+    ) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        cleaned_warnings = [item for item in (warnings or []) if item]
+        self.state_trace.append(
+            AgentStateTraceEntry(
+                state_name=state_name,
+                started_at=now,
+                finished_at=now,
+                status=status,
+                reason=reason,
+                safety_gates_checked=safety_gates_checked or [],
+                request_budget_used=request_budget_used,
+                artifact_inputs=artifact_inputs or [],
+                artifact_outputs=artifact_outputs or [],
+                errors=errors or [],
+                warnings=cleaned_warnings,
+            )
+        )
 
     def _print_run_evaluation(self, evaluation: RunEvaluation) -> None:
         if evaluation.potential_high_signal:
