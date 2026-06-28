@@ -191,6 +191,7 @@ show_help_hint() {
 Examples:
   ./bb.sh setup
   ./bb.sh
+  ./bb.sh operator
   ./bb.sh airtable
   ./bb.sh lab
   ./bb.sh interactive
@@ -221,6 +222,17 @@ Shell flags:
   --profile <name>          Override the default profile for no-arg or interactive runs
   --lab                     Shortcut for local lab interactive mode
 EOF
+}
+
+run_operator() {
+  local profile="${1:-}"
+  shift || true
+  local args=("operator")
+  if [[ -n "$profile" ]]; then
+    args+=("--profile" "$profile")
+  fi
+  args+=("$@")
+  run_cli "${args[@]}"
 }
 
 main() {
@@ -302,7 +314,7 @@ main() {
 
   if [[ "${1:-}" == "airtable" ]]; then
     shift || true
-    run_cli interactive --profile airtable-staging-public-h1 "$@"
+    run_operator "airtable-staging-public-h1" "$@"
     return $?
   fi
 
@@ -310,23 +322,23 @@ main() {
     if [[ "${1:-}" == "lab" ]]; then
       shift || true
     fi
-    run_cli interactive --profile owasp-juice-shop-local "$@"
+    run_operator "owasp-juice-shop-local" "$@"
     return $?
   fi
 
   if [[ "$#" -eq 0 ]]; then
-    say_info "Environment is ready. Launching the autonomous agent."
+    say_info "Environment is ready. Launching the default autonomous operator."
     if [[ -n "$DEFAULT_PROFILE" ]]; then
-      run_cli interactive --profile "$DEFAULT_PROFILE" --max-cycles 3
+      run_operator "$DEFAULT_PROFILE" --max-cycles 3
     else
-      run_cli interactive --profile airtable-staging-public-h1 --max-cycles 3
+      run_operator "" --max-cycles 3
     fi
     return 0
   fi
 
-  if [[ -n "$DEFAULT_PROFILE" && "${1:-}" == "interactive" ]]; then
+  if [[ -n "$DEFAULT_PROFILE" && ( "${1:-}" == "interactive" || "${1:-}" == "operator" ) ]]; then
     shift || true
-    run_cli interactive --profile "$DEFAULT_PROFILE" "$@"
+    run_operator "$DEFAULT_PROFILE" "$@"
     return $?
   fi
 

@@ -89,19 +89,20 @@ def build_parser() -> argparse.ArgumentParser:
     self_test_parser = subparsers.add_parser("self-test", help="Run fast offline validation checks without Docker or browser requirements")
     self_test_parser.set_defaults(func=command_self_test)
 
-    interactive_parser = subparsers.add_parser(
-        "interactive",
-        help="Run the autonomous, policy-safe default agent flow",
+    operator_parser = subparsers.add_parser(
+        "operator",
+        aliases=["interactive"],
+        help="Run the autonomous, policy-safe default no-arg operator flow",
     )
-    add_profile_argument(interactive_parser)
-    interactive_parser.add_argument("--target", help="Optional target override for the selected profile")
-    interactive_parser.add_argument(
+    add_profile_argument(operator_parser)
+    operator_parser.add_argument("--target", help="Optional target override for the selected profile")
+    operator_parser.add_argument(
         "--max-cycles",
         type=int,
         default=3,
         help="Maximum autonomous investigation cycles before stopping safely",
     )
-    interactive_parser.set_defaults(func=command_interactive)
+    operator_parser.set_defaults(func=command_interactive)
 
     profiles_parser = subparsers.add_parser("profiles", help="List configured scope profiles")
     profiles_parser.set_defaults(func=command_profiles)

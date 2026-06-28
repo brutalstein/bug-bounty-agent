@@ -12,6 +12,7 @@ from core.artifact_index import ArtifactIndexBuilder
 from core.console import ConsoleSpinner, print_status
 from core.program_lens import ProgramLensBuilder
 from core.request_budget import RequestBudgetManager, RequestBudgetExceeded
+from core.run_catalog import list_run_dirs as list_real_run_dirs
 from core.run_context import RunContext, create_run_context
 from core.scope import ScopeManager
 
@@ -171,14 +172,7 @@ def build_dashboard_safely(run_dir: str | Path) -> str | None:
 
 
 def list_run_dirs() -> list[Path]:
-    runs_dir = PROJECT_ROOT / "runs"
-    if not runs_dir.exists():
-        return []
-    return sorted(
-        [path for path in runs_dir.iterdir() if path.is_dir()],
-        key=lambda item: item.stat().st_mtime,
-        reverse=True,
-    )
+    return list_real_run_dirs(PROJECT_ROOT / "runs")
 
 
 def find_new_run_dir(existing: set[str]) -> Path | None:

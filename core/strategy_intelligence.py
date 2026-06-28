@@ -8,6 +8,8 @@ import math
 from pathlib import Path
 import json
 
+from core.run_catalog import list_profile_run_dirs
+
 
 @dataclass
 class StrategyPackScore:
@@ -414,20 +416,12 @@ class StrategyIntelligenceAnalyzer:
             if warnings is not None:
                 warnings.append("runs_root_missing")
             return []
-        runs = sorted(
-            [path for path in self.runs_root.iterdir() if path.is_dir() and path != self.run_dir],
-            key=lambda item: item.stat().st_mtime,
-            reverse=True,
-        )
-        selected: list[Path] = []
-        for path in runs:
-            run_data = self._read_json(path / "run.json")
-            if str(run_data.get("profile_name", "")) != profile_name:
-                continue
-            selected.append(path)
-            if len(selected) >= self.max_recent_runs:
-                break
-        return selected
+        return list_profile_run_dirs(
+            self.runs_root,
+            profile_name,
+            exclude_run=self.run_dir,
+            include_archived=True,
+        )[: self.max_recent_runs]
 
     def _score_run(
         self,

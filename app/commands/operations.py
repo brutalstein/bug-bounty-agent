@@ -58,8 +58,11 @@ def command_doctor(_: argparse.Namespace) -> int:
         PROJECT_ROOT / "core" / "deep_hunter.py",
         PROJECT_ROOT / "core" / "llm_client.py",
         PROJECT_ROOT / "core" / "request_budget.py",
+        PROJECT_ROOT / "core" / "run_catalog.py",
+        PROJECT_ROOT / "core" / "run_housekeeping.py",
         PROJECT_ROOT / "core" / "strategy_memory.py",
         PROJECT_ROOT / "core" / "strategy_intelligence.py",
+        PROJECT_ROOT / "core" / "operator_memory.py",
         PROJECT_ROOT / "tools" / "tool_runner.py",
         PROJECT_ROOT / "tools" / "recon_tools.py",
         PROJECT_ROOT / "tools" / "crawl_tools.py",
@@ -156,7 +159,7 @@ def command_interactive(args: argparse.Namespace) -> int:
         max_cycles=args.max_cycles,
     )
 
-    print_ok("Autonomous agent run completed.")
+    print_ok("Autonomous operator run completed.")
     print_info(f"Selected profile: {summary.selected_profile}")
     print_info(f"Selected target: {summary.selected_target}")
     print_info(f"Cycle count: {summary.cycle_count}")

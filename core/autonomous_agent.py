@@ -26,11 +26,15 @@ from app.workflows.internal import (
     run_signals_internal,
     run_surface_recon_internal,
 )
+from core.artifact_index import ArtifactIndexBuilder
 from core.autonomous_decision import AutonomousDecisionEngine
 from core.console import print_status
 from core.http_client import SafeHttpClient
 from core.lab_manager import LabManager
+from core.operator_memory import OperatorMemoryAnalyzer, OperatorMemorySummary
 from core.profile_readiness import ProfileReadinessAssessor
+from core.run_catalog import list_run_dirs as list_real_run_dirs
+from core.run_housekeeping import RunHousekeeper, RunHousekeepingSummary
 from core.scope import ScopeManager
 
 
@@ -135,6 +139,8 @@ class AutonomousAgent:
         self.python_executable = sys.executable
         self.http_client = SafeHttpClient(timeout_seconds=5)
         self.state_trace: list[AgentStateTraceEntry] = []
+        self.operator_memory_summary: OperatorMemorySummary | None = None
+        self.housekeeping_summary: RunHousekeepingSummary | None = None
 
     def run(
         self,
@@ -212,6 +218,31 @@ class AutonomousAgent:
                 warnings=["stale_policy_notes"],
             )
         self._prepare_profile(scope, selected)
+        self.housekeeping_summary = RunHousekeeper(
+            self.project_root / "runs",
+            scope.config.profile_name,
+            keep_recent=8,
+            execute_archive=True,
+        ).run()
+        self.operator_memory_summary = OperatorMemoryAnalyzer(
+            self.project_root / "runs",
+            scope.config.profile_name,
+        ).build()
+        self._record_state(
+            state_name="MEMORY_SYNC",
+            status="completed",
+            reason="Operator memory and run housekeeping refreshed.",
+            safety_gates_checked=["real_run_catalog", "archive_only_low_value_runs"],
+            artifact_outputs=[
+                self.housekeeping_summary.global_json_path,
+                self.operator_memory_summary.global_json_path,
+            ],
+            warnings=[
+                f"archived_runs={self.housekeeping_summary.archived_runs}"
+                if self.housekeeping_summary.archived_runs
+                else "",
+            ],
+        )
         self._record_state(
             state_name="POLICY_VERIFY",
             status="completed",
@@ -235,6 +266,7 @@ class AutonomousAgent:
         )
 
         derived_targets = self.derive_targets(scope, selected_target)
+        derived_targets = self._apply_operator_memory_targets(derived_targets, selected_target)
         print_status("info", f"Selected profile: {selected.profile_name}")
         print_status("info", f"Selected target: {selected_target}")
         if derived_targets:
@@ -301,6 +333,7 @@ class AutonomousAgent:
             evaluation = self.evaluate_run(run_dir, plan["flow_name"])
             evaluations.append(evaluation)
             used_targets.extend(str(item) for item in plan.get("targets", []) if str(item).strip())
+            self._write_operator_context(run_dir)
             self._print_run_evaluation(evaluation)
             self.write_agent_summary(run_dir, evaluations, selected.profile_name, selected_target)
             self.write_agent_state_trace(run_dir)
@@ -797,14 +830,7 @@ class AutonomousAgent:
         report_path.write_text("\n".join(lines), encoding="utf-8")
 
     def list_run_dirs(self) -> list[Path]:
-        runs_dir = self.project_root / "runs"
-        if not runs_dir.exists():
-            return []
-        return sorted(
-            [path for path in runs_dir.iterdir() if path.is_dir()],
-            key=lambda item: item.stat().st_mtime,
-            reverse=True,
-        )
+        return list_real_run_dirs(self.project_root / "runs")
 
     def find_new_run_dir(self, existing: set[str]) -> Path | None:
         current = self.list_run_dirs()
@@ -851,6 +877,11 @@ class AutonomousAgent:
         label = str(plan.get("label", "")).lower()
         targets = [str(item).lower() for item in plan.get("targets", []) if str(item).strip()]
         score = 0
+        deprioritized_focuses = set()
+        if self.operator_memory_summary is not None:
+            deprioritized_focuses = {
+                str(item).strip() for item in self.operator_memory_summary.deprioritized_focuses if str(item).strip()
+            }
 
         if highest_priority_target and any(highest_priority_target.lower() in item for item in targets):
             score += 5
@@ -872,7 +903,22 @@ class AutonomousAgent:
         elif focus == "session_boundary_recon":
             if "session-boundary" in label:
                 score += 4
+        plan_focus = self._focus_from_plan_label(label)
+        if plan_focus and plan_focus in deprioritized_focuses:
+            score -= 3
         return score
+
+    def _focus_from_plan_label(self, label: str) -> str:
+        lowered = str(label).lower()
+        if "developer-surface" in lowered:
+            return "developer_surface_recon"
+        if "api-first" in lowered or "api-boundary" in lowered:
+            return "api_boundary_recon"
+        if "session-boundary" in lowered:
+            return "session_boundary_recon"
+        if "boundary hotspot" in lowered:
+            return "boundary_hotspot_recon"
+        return ""
 
     def _decision_driven_plan(
         self,
@@ -1106,6 +1152,11 @@ class AutonomousAgent:
         print_status("review", f"Policy restrictions: {scope.config.policy.disallowed_actions}")
         enabled_capabilities = [name for name, enabled in scope.capabilities_snapshot().items() if enabled]
         print_status("review", f"Enabled capabilities: {enabled_capabilities}")
+        if self.operator_memory_summary is not None:
+            print_status("review", f"Cooled targets: {self.operator_memory_summary.cooled_targets}")
+            print_status("review", f"Suppressed families: {self.operator_memory_summary.suppressed_endpoint_families}")
+        if self.housekeeping_summary is not None and self.housekeeping_summary.archived_runs:
+            print_status("review", f"Archived low-value runs: {self.housekeeping_summary.archived_runs}")
         print_status(
             "review",
             "Planned phases: PREFLIGHT -> POLICY_VERIFY -> TARGET_DERIVE -> PASSIVE_RECON -> SIGNAL_DETECT -> SAFE_DEEP_HUNT -> EVIDENCE_PACK -> REVIEW_QUEUE -> REPORT_DRAFT -> DASHBOARD -> STOP",
@@ -1158,6 +1209,33 @@ class AutonomousAgent:
             return 4
         return 3
 
+    def _apply_operator_memory_targets(self, targets: list[str], selected_target: str) -> list[str]:
+        if self.operator_memory_summary is None:
+            return targets
+        cooled = {str(item).strip() for item in self.operator_memory_summary.cooled_targets if str(item).strip()}
+        suppressed = {
+            str(item).strip()
+            for item in self.operator_memory_summary.suppressed_endpoint_families
+            if str(item).strip()
+        }
+        prioritized: list[str] = []
+        deferred: list[str] = []
+        selected = str(selected_target).strip()
+        for target in targets:
+            normalized = str(target).strip()
+            if not normalized:
+                continue
+            if normalized == selected:
+                prioritized.append(normalized)
+                continue
+            family = self._endpoint_family(normalized)
+            if normalized in cooled or (family and family in suppressed):
+                deferred.append(normalized)
+                continue
+            prioritized.append(normalized)
+        merged = [item for item in dict.fromkeys(prioritized + deferred) if item]
+        return merged or [selected]
+
     def _surface_focus_for_decision_focus(self, focus: str) -> str:
         mapping = {
             "boundary_hotspot_recon": "boundary",
@@ -1205,6 +1283,23 @@ class AutonomousAgent:
                 warnings=cleaned_warnings,
             )
         )
+
+    def _write_operator_context(self, run_dir: Path) -> None:
+        if self.operator_memory_summary is not None:
+            OperatorMemoryAnalyzer(
+                self.project_root / "runs",
+                self.operator_memory_summary.profile_name,
+                output_run_dir=run_dir,
+            ).build()
+        if self.housekeeping_summary is not None:
+            RunHousekeeper(
+                self.project_root / "runs",
+                self.housekeeping_summary.profile_name,
+                output_run_dir=run_dir,
+                keep_recent=self.housekeeping_summary.keep_recent,
+                execute_archive=False,
+            ).run()
+        ArtifactIndexBuilder(run_dir).build()
 
     def _print_run_evaluation(self, evaluation: RunEvaluation) -> None:
         if evaluation.potential_high_signal:

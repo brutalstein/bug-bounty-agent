@@ -48,6 +48,8 @@ class ArtifactIndexBuilder:
         hypothesis_ledger = self._read_json(self.parsed_dir / "hypothesis_ledger.json")
         autonomous_decision = self._read_json(self.parsed_dir / "autonomous_decision.json")
         strategy_intelligence = self._read_json(self.parsed_dir / "strategy_intelligence.json")
+        operator_memory = self._read_json(self.parsed_dir / "operator_memory.json")
+        run_housekeeping = self._read_json(self.parsed_dir / "run_housekeeping.json")
         llm_usage = self._read_json(self.parsed_dir / "llm_usage.json")
         artifact_refresh_state = self._read_json(self.parsed_dir / "artifact_refresh_state.json")
         request_budget = self._read_json(self.parsed_dir / "request_budget.json")
@@ -81,6 +83,8 @@ class ArtifactIndexBuilder:
                 self.reports_dir / "hypothesis_ledger.md",
                 self.reports_dir / "autonomous_decision.md",
                 self.reports_dir / "strategy_intelligence.md",
+                self.reports_dir / "operator_memory.md",
+                self.reports_dir / "run_housekeeping.md",
                 self.reports_dir / "agent_summary.md",
                 self.reports_dir / "evidence_pack.md",
                 self.reports_dir / "final_report_draft.md",
@@ -114,6 +118,8 @@ class ArtifactIndexBuilder:
                 self.parsed_dir / "hypothesis_ledger.json",
                 self.parsed_dir / "autonomous_decision.json",
                 self.parsed_dir / "strategy_intelligence.json",
+                self.parsed_dir / "operator_memory.json",
+                self.parsed_dir / "run_housekeeping.json",
                 self.parsed_dir / "deep_hunt_strategy.json",
                 self.parsed_dir / "llm_usage.json",
                 self.parsed_dir / "llm_traces.jsonl",
@@ -164,6 +170,8 @@ class ArtifactIndexBuilder:
             hypothesis_ledger=hypothesis_ledger,
             autonomous_decision=autonomous_decision,
             strategy_intelligence=strategy_intelligence,
+            operator_memory=operator_memory,
+            run_housekeeping=run_housekeeping,
             llm_usage=llm_usage,
             artifact_refresh_state=artifact_refresh_state,
             request_budget=request_budget,
@@ -198,6 +206,8 @@ class ArtifactIndexBuilder:
         hypothesis_ledger: dict,
         autonomous_decision: dict,
         strategy_intelligence: dict,
+        operator_memory: dict,
+        run_housekeeping: dict,
         llm_usage: dict,
         artifact_refresh_state: dict,
         request_budget: dict,
@@ -291,6 +301,13 @@ class ArtifactIndexBuilder:
         if strategy_intelligence:
             lines.append(f"- **Learned Strategy Overrides:** `{strategy_intelligence.get('recommended_packs', {})}`")
             lines.append(f"- **Strategy Runs Considered:** `{strategy_intelligence.get('recent_run_count', 0)}`")
+        if operator_memory:
+            lines.append(f"- **Operator Memory Cooled Targets:** `{operator_memory.get('cooled_targets', [])}`")
+            lines.append(f"- **Operator Memory Suppressed Families:** `{operator_memory.get('suppressed_endpoint_families', [])}`")
+            lines.append(f"- **Operator Memory Deprioritized Focuses:** `{operator_memory.get('deprioritized_focuses', [])}`")
+        if run_housekeeping:
+            lines.append(f"- **Housekeeping Archived Runs:** `{run_housekeeping.get('archived_runs', 0)}`")
+            lines.append(f"- **Housekeeping Keep Recent:** `{run_housekeeping.get('keep_recent', 0)}`")
         if request_budget:
             lines.append(f"- **Request Budget Used:** `{request_budget.get('total_requests', 0)}` / `{request_budget.get('total_request_limit', 0)}`")
             lines.append(f"- **Request Budget Stop Reason:** `{request_budget.get('stop_reason', '')}`")
@@ -348,6 +365,8 @@ class ArtifactIndexBuilder:
         lines.append(f"- `reports/hypothesis_ledger.md` {'(present)' if (self.reports_dir / 'hypothesis_ledger.md').exists() else '(missing)' }")
         lines.append(f"- `reports/autonomous_decision.md` {'(present)' if (self.reports_dir / 'autonomous_decision.md').exists() else '(missing)' }")
         lines.append(f"- `reports/strategy_intelligence.md` {'(present)' if (self.reports_dir / 'strategy_intelligence.md').exists() else '(missing)' }")
+        lines.append(f"- `reports/operator_memory.md` {'(present)' if (self.reports_dir / 'operator_memory.md').exists() else '(missing)' }")
+        lines.append(f"- `reports/run_housekeeping.md` {'(present)' if (self.reports_dir / 'run_housekeeping.md').exists() else '(missing)' }")
         lines.append(f"- `reports/agent_summary.md` {'(present)' if (self.reports_dir / 'agent_summary.md').exists() else '(missing)' }")
         lines.append(f"- `reports/evidence_pack.md` {'(present)' if (self.reports_dir / 'evidence_pack.md').exists() else '(missing)' }")
         lines.append(f"- `reports/final_report_draft.md` {'(present)' if (self.reports_dir / 'final_report_draft.md').exists() else '(missing)' }")

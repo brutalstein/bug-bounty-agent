@@ -13,6 +13,13 @@ def test_interactive_default_cycles_is_three():
     assert args.max_cycles == 3
 
 
+def test_operator_default_cycles_is_three():
+    parser = build_parser()
+    args = parser.parse_args(["operator"])
+    assert args.max_cycles == 3
+    assert args.command == "operator"
+
+
 def test_high_value_recon_enriches_signals(tmp_path):
     run_dir = tmp_path / "run-1"
     parsed_dir = run_dir / "parsed"
