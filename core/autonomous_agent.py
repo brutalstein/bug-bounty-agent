@@ -69,6 +69,9 @@ class RunEvaluation:
     stop_reason: str
     decision: str
     next_cycle_focus: str
+    focus_source: str
+    focus_support_runs: int
+    exploration_focus: str
     highest_priority_target: str
     boundary_hotspot_count: int
     manual_approval_recommended: bool
@@ -651,6 +654,9 @@ class AutonomousAgent:
             stop_reason=stop_reason,
             decision=decision_summary.decision,
             next_cycle_focus=decision_summary.next_cycle_focus,
+            focus_source=decision_summary.focus_source,
+            focus_support_runs=decision_summary.focus_support_runs,
+            exploration_focus=decision_summary.exploration_focus,
             highest_priority_target=decision_summary.highest_priority_target,
             boundary_hotspot_count=decision_summary.boundary_hotspot_count,
             manual_approval_recommended=decision_summary.manual_approval_recommended,
@@ -717,6 +723,9 @@ class AutonomousAgent:
             lines.append(f"- **Potential High Signal:** `{evaluation.potential_high_signal}`")
             lines.append(f"- **Decision:** `{evaluation.decision}`")
             lines.append(f"- **Next Cycle Focus:** `{evaluation.next_cycle_focus}`")
+            lines.append(f"- **Focus Source:** `{evaluation.focus_source}`")
+            lines.append(f"- **Focus Support Runs:** `{evaluation.focus_support_runs}`")
+            lines.append(f"- **Exploration Focus:** `{evaluation.exploration_focus}`")
             lines.append(f"- **Boundary Hotspots:** `{evaluation.boundary_hotspot_count}`")
             lines.append(f"- **Highest Priority Target:** `{evaluation.highest_priority_target}`")
             lines.append(f"- **Strategy Pack:** `{evaluation.recommended_strategy_pack}`")
@@ -1095,6 +1104,10 @@ class AutonomousAgent:
         print_status("info", f"Deep hunt escalated: {evaluation.deep_hunt_escalated}")
         print_status("info", f"Decision: {evaluation.decision}")
         print_status("info", f"Next cycle focus: {evaluation.next_cycle_focus}")
+        print_status("info", f"Focus source: {evaluation.focus_source}")
+        print_status("info", f"Focus support runs: {evaluation.focus_support_runs}")
+        if evaluation.exploration_focus:
+            print_status("info", f"Exploration focus: {evaluation.exploration_focus}")
         print_status("info", f"Boundary hotspots: {evaluation.boundary_hotspot_count}")
         print_status("info", f"Strategy pack: {evaluation.recommended_strategy_pack}")
         print_status("info", f"Strategy source: {evaluation.strategy_source}")

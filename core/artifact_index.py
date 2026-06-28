@@ -262,12 +262,17 @@ class ArtifactIndexBuilder:
         if autonomous_decision:
             lines.append(f"- **Autonomous Decision:** `{autonomous_decision.get('decision', '')}`")
             lines.append(f"- **Autonomous Next Focus:** `{autonomous_decision.get('next_cycle_focus', '')}`")
+            lines.append(f"- **Autonomous Focus Source:** `{autonomous_decision.get('focus_source', '')}`")
+            lines.append(f"- **Autonomous Focus Support Runs:** `{autonomous_decision.get('focus_support_runs', 0)}`")
+            lines.append(f"- **Autonomous Exploration Focus:** `{autonomous_decision.get('exploration_focus', '')}`")
             lines.append(f"- **Boundary Hotspots:** `{autonomous_decision.get('boundary_hotspot_count', 0)}`")
             lines.append(f"- **Autonomous Strategy Pack:** `{autonomous_decision.get('recommended_strategy_pack', '')}`")
             lines.append(f"- **Autonomous Signal Type:** `{autonomous_decision.get('recommended_signal_type', '')}`")
             lines.append(f"- **Autonomous Strategy Source:** `{autonomous_decision.get('strategy_source', '')}`")
             lines.append(f"- **Autonomous Strategy Support Runs:** `{autonomous_decision.get('strategy_support_runs', 0)}`")
             lines.append(f"- **Autonomous Exploration Pack:** `{autonomous_decision.get('exploration_pack', '')}`")
+            lines.append(f"- **Intelligence Warnings:** `{autonomous_decision.get('intelligence_warnings', [])}`")
+            lines.append(f"- **Intelligence Errors:** `{autonomous_decision.get('intelligence_errors', [])}`")
             if autonomous_decision.get("manual_approval_recommended"):
                 lines.append(f"- **Manual Approval Next Step:** `{autonomous_decision.get('manual_approval_command', '')}`")
         if strategy_intelligence:

@@ -168,8 +168,11 @@ def command_interactive(args: argparse.Namespace) -> int:
         print_info(f"Latest dashboard: {last['dashboard_path']}")
         print_info(f"Latest decision: {last['decision']}")
         print_info(f"Latest next focus: {last['next_cycle_focus']}")
+        print_info(f"Latest focus source: {last['focus_source']}")
         print_info(f"Latest strategy pack: {last['recommended_strategy_pack']}")
         print_info(f"Latest strategy source: {last['strategy_source']}")
+        if last.get("exploration_focus"):
+            print_info(f"Latest exploration focus: {last['exploration_focus']}")
         if last.get("exploration_pack"):
             print_info(f"Latest exploration pack: {last['exploration_pack']}")
         if last.get("manual_approval_recommended"):

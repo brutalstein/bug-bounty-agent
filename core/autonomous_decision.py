@@ -32,6 +32,9 @@ class AutonomousDecisionSummary:
     stop_reason: str
     should_stop: bool
     next_cycle_focus: str
+    focus_source: str
+    focus_support_runs: int
+    exploration_focus: str
     highest_priority_target: str
     boundary_hotspot_count: int
     manual_approval_recommended: bool
@@ -46,6 +49,8 @@ class AutonomousDecisionSummary:
     recommended_targets: list[str]
     strongest_hotspots: list[dict]
     rationale: list[str]
+    intelligence_warnings: list[str]
+    intelligence_errors: list[str]
     json_path: str
     markdown_path: str
 
@@ -69,7 +74,15 @@ class AutonomousDecisionEngine:
         session_compare = self._read_json(self.parsed_dir / "session_compare.json")
         review_queue = self._read_json(self.parsed_dir / "review_queue.json")
         final_report = self._read_json(self.parsed_dir / "final_report_draft.json")
-        strategy_intelligence = StrategyIntelligenceAnalyzer(self.run_dir).build()
+        intelligence_warnings: list[str] = []
+        intelligence_errors: list[str] = []
+        try:
+            strategy_intelligence = StrategyIntelligenceAnalyzer(self.run_dir).build()
+            intelligence_warnings = list(getattr(strategy_intelligence, "warnings", []) or [])
+            intelligence_errors = list(getattr(strategy_intelligence, "errors", []) or [])
+        except Exception as error:
+            strategy_intelligence = None
+            intelligence_errors = [f"strategy_intelligence_build_failed:{error}"]
 
         hotspots = self._collect_hotspots(signals=signals, deep_hunt=deep_hunt, session_compare=session_compare)
         recommended_targets = self._recommended_targets(hotspots)
@@ -81,6 +94,9 @@ class AutonomousDecisionEngine:
         review_queue_start_now = int(review_queue.get("start_now_count", 0))
         boundary_hotspot_count = len(hotspots)
         next_cycle_focus = "continue_passive_surface_expansion"
+        focus_source = "decision_default"
+        focus_support_runs = 0
+        exploration_focus = ""
         decision = "continue"
         stop_reason = "no_meaningful_signal_detected_in_safe_budget"
         should_stop = False
@@ -197,6 +213,22 @@ class AutonomousDecisionEngine:
             rationale.append("No meaningful boundary or exposure signals were found in the current run.")
 
         (
+            next_cycle_focus,
+            focus_source,
+            focus_support_runs,
+            exploration_focus,
+        ) = self._apply_focus_learning(
+            next_cycle_focus=next_cycle_focus,
+            strategy_intelligence=strategy_intelligence,
+        )
+
+        default_pack, default_methods = self._focus_defaults(next_cycle_focus)
+        if default_pack:
+            recommended_strategy_pack = default_pack
+        if default_methods:
+            recommended_method_sequence = default_methods
+
+        (
             recommended_strategy_pack,
             recommended_method_sequence,
             strategy_source,
@@ -217,6 +249,9 @@ class AutonomousDecisionEngine:
             stop_reason=stop_reason,
             should_stop=should_stop,
             next_cycle_focus=next_cycle_focus,
+            focus_source=focus_source,
+            focus_support_runs=focus_support_runs,
+            exploration_focus=exploration_focus,
             highest_priority_target=highest_priority_target,
             boundary_hotspot_count=boundary_hotspot_count,
             manual_approval_recommended=manual_approval_recommended,
@@ -231,6 +266,8 @@ class AutonomousDecisionEngine:
             recommended_targets=recommended_targets,
             strongest_hotspots=[item.to_dict() for item in hotspots[:5]],
             rationale=rationale,
+            intelligence_warnings=intelligence_warnings,
+            intelligence_errors=intelligence_errors,
             json_path=str(self.output_json_path),
             markdown_path=str(self.output_markdown_path),
         )
@@ -364,6 +401,108 @@ class AutonomousDecisionEngine:
 
         hotspots.sort(key=lambda item: (-item.score, item.signal_type, item.endpoint))
         return hotspots
+
+    def _apply_focus_learning(
+        self,
+        *,
+        next_cycle_focus: str,
+        strategy_intelligence,
+    ) -> tuple[str, str, int, str]:
+        if strategy_intelligence is None:
+            return next_cycle_focus, "decision_default", 0, ""
+
+        focus_group = self._focus_group(next_cycle_focus)
+        if not focus_group:
+            return next_cycle_focus, "decision_default", 0, ""
+
+        recommended_focuses = getattr(strategy_intelligence, "recommended_focuses", {}) or {}
+        exploration_focuses = getattr(strategy_intelligence, "exploration_focuses", {}) or {}
+        selected_focus = next_cycle_focus
+        focus_source = "decision_default"
+        support_runs = 0
+        exploration_focus = str(exploration_focuses.get(focus_group, "")).strip()
+
+        learned_focus = str(recommended_focuses.get(focus_group, "")).strip()
+        if learned_focus:
+            selected_focus = learned_focus
+            focus_source = "learned_focus_efficiency"
+            support_runs = self._focus_support(strategy_intelligence, learned_focus)
+
+        if exploration_focus and selected_focus == next_cycle_focus and support_runs <= 1:
+            selected_focus = exploration_focus
+            focus_source = "exploration_focus_rebalance"
+            support_runs = self._focus_support(strategy_intelligence, exploration_focus)
+
+        return selected_focus, focus_source, support_runs, exploration_focus
+
+    def _focus_support(self, strategy_intelligence, focus: str) -> int:
+        focus_scores = getattr(strategy_intelligence, "focus_scores", []) or []
+        for item in focus_scores:
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("focus", "")) == focus:
+                return int(item.get("runs", 0))
+        return 0
+
+    def _focus_group(self, focus: str) -> str:
+        mapping = {
+            "session_boundary_recon": "passive_surface_expansion",
+            "api_boundary_recon": "passive_surface_expansion",
+            "developer_surface_recon": "passive_surface_expansion",
+            "boundary_hotspot_recon": "boundary_validation",
+            "manual_auth_diff": "manual_boundary_validation",
+            "human_review": "terminal_review",
+        }
+        return mapping.get(str(focus).strip(), "")
+
+    def _focus_defaults(self, focus: str) -> tuple[str, list[str]]:
+        defaults = {
+            "boundary_hotspot_recon": (
+                "boundary_cache_auth_investigator",
+                [
+                    "session_boundary_evidence_review",
+                    "cache_auth_boundary_investigator",
+                    "readonly_variant_matrix_review",
+                    "cross_surface_context_review",
+                ],
+            ),
+            "session_boundary_recon": (
+                "session_boundary_mapper",
+                [
+                    "session_boundary_evidence_review",
+                    "readonly_variant_matrix_review",
+                    "response_shape_review",
+                    "route_family_neighbor_review",
+                ],
+            ),
+            "api_boundary_recon": (
+                "api_surface_correlator",
+                [
+                    "context_from_ranked_candidates",
+                    "cross_surface_context_review",
+                    "route_family_neighbor_review",
+                    "safe_reprobe_get",
+                ],
+            ),
+            "developer_surface_recon": (
+                "developer_surface_expander",
+                [
+                    "js_context_review",
+                    "cross_surface_context_review",
+                    "header_policy_review",
+                ],
+            ),
+            "manual_auth_diff": (
+                "manual_auth_boundary_diff",
+                [
+                    "session_boundary_evidence_review",
+                    "cache_auth_boundary_investigator",
+                    "readonly_variant_matrix_review",
+                ],
+            ),
+            "human_review": ("human_review_handoff", []),
+        }
+        return defaults.get(str(focus).strip(), ("", []))
 
     def _apply_strategy_learning(
         self,
@@ -508,6 +647,9 @@ class AutonomousDecisionEngine:
         lines.append(f"- **Stop Reason:** `{summary.stop_reason}`")
         lines.append(f"- **Should Stop:** `{summary.should_stop}`")
         lines.append(f"- **Next Cycle Focus:** `{summary.next_cycle_focus}`")
+        lines.append(f"- **Focus Source:** `{summary.focus_source}`")
+        lines.append(f"- **Focus Support Runs:** `{summary.focus_support_runs}`")
+        lines.append(f"- **Exploration Focus:** `{summary.exploration_focus}`")
         lines.append(f"- **Highest Priority Target:** `{summary.highest_priority_target}`")
         lines.append(f"- **Boundary Hotspots:** `{summary.boundary_hotspot_count}`")
         lines.append(f"- **Recommended Targets:** `{summary.recommended_targets}`")
@@ -536,6 +678,12 @@ class AutonomousDecisionEngine:
                     f"- `{item.get('signal_type')}` `{item.get('endpoint')}` "
                     f"score=`{item.get('score')}` evidence=`{item.get('evidence')}`"
                 )
+            lines.append("")
+        if summary.intelligence_warnings or summary.intelligence_errors:
+            lines.append("## Intelligence Health")
+            lines.append("")
+            lines.append(f"- **Warnings:** `{summary.intelligence_warnings}`")
+            lines.append(f"- **Errors:** `{summary.intelligence_errors}`")
             lines.append("")
         return "\n".join(lines)
 

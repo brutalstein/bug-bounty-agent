@@ -181,6 +181,7 @@ def test_autonomous_decision_uses_learned_strategy_override(tmp_path):
 
     assert summary.next_cycle_focus == "session_boundary_recon"
     assert summary.recommended_strategy_pack == "session_boundary_mapper"
+    assert summary.focus_source == "learned_focus_efficiency"
     assert summary.strategy_source == "learned_recent_runs"
     assert summary.strategy_support_runs >= 2
 
@@ -331,5 +332,94 @@ def test_autonomous_decision_can_switch_to_exploration_pack(tmp_path):
     summary = AutonomousDecisionEngine(run_dir).build()
 
     assert summary.exploration_pack == "boundary_cache_auth_investigator"
+    assert summary.exploration_focus == "api_boundary_recon" or summary.exploration_focus == ""
     assert summary.recommended_strategy_pack == "boundary_cache_auth_investigator"
     assert summary.strategy_source == "exploration_rebalance"
+
+
+def test_strategy_intelligence_recommends_focus_by_efficiency(tmp_path):
+    _write_run(
+        tmp_path,
+        "run-session-a",
+        profile="airtable-staging-public-h1",
+        focus="session_boundary_recon",
+        pack="session_boundary_mapper",
+        signals_with_findings=1,
+        total_requests=20,
+    )
+    _write_run(
+        tmp_path,
+        "run-api-a",
+        profile="airtable-staging-public-h1",
+        focus="api_boundary_recon",
+        pack="api_surface_correlator",
+        signals_with_findings=2,
+        total_requests=7,
+        boundary_hotspot_count=0,
+    )
+    current_run = _write_run(
+        tmp_path,
+        "run-current-focus",
+        profile="airtable-staging-public-h1",
+        focus="session_boundary_recon",
+        pack="session_boundary_mapper",
+        signals_with_findings=0,
+    )
+
+    summary = StrategyIntelligenceAnalyzer(current_run).build()
+
+    assert summary.recommended_focuses["passive_surface_expansion"] == "api_boundary_recon"
+
+
+def test_strategy_intelligence_tolerates_broken_historical_run(tmp_path):
+    broken_dir = tmp_path / "run-broken"
+    (broken_dir / "parsed").mkdir(parents=True)
+    (broken_dir / "reports").mkdir(parents=True)
+    (broken_dir / "run.json").write_text("{not-json", encoding="utf-8")
+    current_run = _write_run(
+        tmp_path,
+        "run-current-safe",
+        profile="airtable-staging-public-h1",
+        focus="session_boundary_recon",
+        pack="session_boundary_mapper",
+        signals_with_findings=0,
+    )
+
+    summary = StrategyIntelligenceAnalyzer(current_run).build()
+
+    assert summary.recent_run_count >= 0
+    assert isinstance(summary.warnings, list)
+    assert isinstance(summary.errors, list)
+
+
+def test_autonomous_decision_survives_strategy_intelligence_failure(tmp_path, monkeypatch):
+    run_dir = tmp_path / "run-current"
+    parsed_dir = run_dir / "parsed"
+    reports_dir = run_dir / "reports"
+    parsed_dir.mkdir(parents=True)
+    reports_dir.mkdir(parents=True)
+    (run_dir / "run.json").write_text(
+        json.dumps(
+            {
+                "target_url": "https://staging.airtable.com",
+                "profile_name": "airtable-staging-public-h1",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (parsed_dir / "signals.json").write_text(json.dumps({"total_signals": 0, "signals": []}), encoding="utf-8")
+    (parsed_dir / "deep_hunt.json").write_text(json.dumps({"escalated_count": 0, "signals": []}), encoding="utf-8")
+    (parsed_dir / "session_compare.json").write_text(json.dumps({"items": []}), encoding="utf-8")
+    (parsed_dir / "review_queue.json").write_text(json.dumps({"start_now_count": 0}), encoding="utf-8")
+    (parsed_dir / "final_report_draft.json").write_text(json.dumps({"candidate_items": 0}), encoding="utf-8")
+
+    def boom(self):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(StrategyIntelligenceAnalyzer, "build", boom)
+
+    summary = AutonomousDecisionEngine(run_dir).build()
+
+    assert summary.decision == "continue"
+    assert summary.focus_source == "decision_default"
+    assert summary.intelligence_errors

@@ -32,15 +32,41 @@ class StrategyPackScore:
 
 
 @dataclass
+class FocusScore:
+    focus: str
+    focus_group: str
+    runs: int
+    total_score: int
+    average_score: float
+    positive_run_ratio: float
+    total_requests: int
+    average_requests: float
+    average_error_rate: float
+    efficiency_score: float
+    low_value_runs: int
+    top_strategy_pack: str
+    last_used_at: str
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+@dataclass
 class StrategyIntelligenceSummary:
     profile_name: str
     generated_at: str
     recent_run_count: int
     run_window: int
+    recommended_focuses: dict[str, str]
+    exploration_focuses: dict[str, str]
     recommended_packs: dict[str, str]
     recommended_methods: dict[str, list[str]]
     exploration_packs: dict[str, str]
+    focus_scores: list[dict]
     pack_scores: list[dict]
+    warnings: list[str]
+    errors: list[str]
+    fallback_used: bool
     json_path: str
     markdown_path: str
 
@@ -60,14 +86,25 @@ class StrategyIntelligenceAnalyzer:
         self.max_recent_runs = max(1, int(max_recent_runs))
 
     def build(self) -> StrategyIntelligenceSummary:
+        warnings: list[str] = []
+        errors: list[str] = []
+        fallback_used = False
+
         current_run = self._read_json(self.run_dir / "run.json")
         profile_name = str(current_run.get("profile_name", "unknown"))
-        recent_runs = self._recent_profile_runs(profile_name)
+        if not profile_name or profile_name == "unknown":
+            warnings.append("current_run_profile_unknown")
+        recent_runs = self._recent_profile_runs(profile_name, warnings=warnings)
 
         aggregates: dict[tuple[str, str], dict] = {}
         recent_focus_history: dict[str, list[dict]] = {}
         for run_path in recent_runs:
-            record = self._score_run(run_path, profile_name)
+            try:
+                record = self._score_run(run_path, profile_name, warnings=warnings)
+            except Exception as error:
+                errors.append(f"score_run_failed:{run_path.name}:{error}")
+                fallback_used = True
+                continue
             if record is None:
                 continue
             key = (record["focus"], record["strategy_pack"])
@@ -113,6 +150,7 @@ class StrategyIntelligenceAnalyzer:
             )
 
         pack_scores: list[StrategyPackScore] = []
+        focus_aggregates: dict[str, dict] = {}
         for aggregate in aggregates.values():
             preferred_methods = [
                 item[0]
@@ -153,6 +191,33 @@ class StrategyIntelligenceAnalyzer:
                     preferred_methods=preferred_methods,
                 )
             )
+            focus_key = str(aggregate["focus"])
+            focus_bucket = focus_aggregates.setdefault(
+                focus_key,
+                {
+                    "focus": focus_key,
+                    "focus_group": self._focus_group(focus_key),
+                    "runs": 0,
+                    "total_score": 0,
+                    "positive_runs": 0,
+                    "total_requests": 0,
+                    "error_rate_sum": 0.0,
+                    "low_value_runs": 0,
+                    "top_strategy_pack": "",
+                    "top_efficiency": float("-inf"),
+                    "last_used_at": "",
+                },
+            )
+            focus_bucket["runs"] += runs
+            focus_bucket["total_score"] += int(aggregate["total_score"])
+            focus_bucket["positive_runs"] += int(aggregate["positive_runs"])
+            focus_bucket["total_requests"] += total_requests
+            focus_bucket["error_rate_sum"] += float(aggregate["error_rate_sum"])
+            focus_bucket["low_value_runs"] += int(aggregate["low_value_runs"])
+            focus_bucket["last_used_at"] = max(str(focus_bucket["last_used_at"]), str(aggregate["last_used_at"]))
+            if efficiency_score > float(focus_bucket["top_efficiency"]):
+                focus_bucket["top_efficiency"] = efficiency_score
+                focus_bucket["top_strategy_pack"] = str(aggregate["strategy_pack"])
 
         pack_scores.sort(
             key=lambda item: (
@@ -167,6 +232,67 @@ class StrategyIntelligenceAnalyzer:
         recommended_packs: dict[str, str] = {}
         recommended_methods: dict[str, list[str]] = {}
         exploration_packs: dict[str, str] = {}
+        focus_scores: list[FocusScore] = []
+        for aggregate in focus_aggregates.values():
+            runs = max(int(aggregate["runs"]), 1)
+            total_requests = max(int(aggregate["total_requests"]), 0)
+            average_requests = round(total_requests / runs, 3)
+            average_error_rate = round(float(aggregate["error_rate_sum"]) / runs, 4)
+            positive_run_ratio = round(float(aggregate["positive_runs"]) / runs, 3)
+            average_score = round(float(aggregate["total_score"]) / runs, 3)
+            efficiency_score = round(
+                (average_score * 4.0) / max(average_requests, 1.0)
+                + positive_run_ratio
+                - (average_error_rate * 2.5),
+                3,
+            )
+            focus_scores.append(
+                FocusScore(
+                    focus=str(aggregate["focus"]),
+                    focus_group=str(aggregate["focus_group"]),
+                    runs=runs,
+                    total_score=int(aggregate["total_score"]),
+                    average_score=average_score,
+                    positive_run_ratio=positive_run_ratio,
+                    total_requests=total_requests,
+                    average_requests=average_requests,
+                    average_error_rate=average_error_rate,
+                    efficiency_score=efficiency_score,
+                    low_value_runs=int(aggregate["low_value_runs"]),
+                    top_strategy_pack=str(aggregate["top_strategy_pack"]),
+                    last_used_at=str(aggregate["last_used_at"]),
+                )
+            )
+        focus_scores.sort(
+            key=lambda item: (
+                item.focus_group,
+                -(item.average_score + item.efficiency_score),
+                -item.runs,
+                item.focus,
+            )
+        )
+
+        recommended_focuses: dict[str, str] = {}
+        exploration_focuses: dict[str, str] = {}
+        for focus_group in sorted({item.focus_group for item in focus_scores if item.focus_group}):
+            group_candidates = [item for item in focus_scores if item.focus_group == focus_group]
+            if not group_candidates:
+                continue
+            best_focus = sorted(
+                group_candidates,
+                key=lambda item: (
+                    -(item.average_score + item.efficiency_score),
+                    -item.positive_run_ratio,
+                    -item.runs,
+                    item.focus,
+                ),
+            )[0]
+            if best_focus.runs >= 2 or best_focus.total_score >= 5:
+                recommended_focuses[focus_group] = best_focus.focus
+            exploration_focus = self._pick_exploration_focus(group_candidates)
+            if exploration_focus is not None:
+                exploration_focuses[focus_group] = exploration_focus.focus
+
         for focus in sorted({item.focus for item in pack_scores}):
             candidates = [item for item in pack_scores if item.focus == focus]
             if not candidates:
@@ -186,7 +312,6 @@ class StrategyIntelligenceAnalyzer:
                 if best.preferred_methods:
                     recommended_methods[focus] = list(best.preferred_methods)
             alternate = self._pick_exploration_pack(
-                focus=focus,
                 candidates=candidates,
                 recent_history=recent_focus_history.get(focus, []),
             )
@@ -198,10 +323,16 @@ class StrategyIntelligenceAnalyzer:
             generated_at=datetime.now(timezone.utc).isoformat(),
             recent_run_count=len(recent_runs),
             run_window=self.max_recent_runs,
+            recommended_focuses=recommended_focuses,
+            exploration_focuses=exploration_focuses,
             recommended_packs=recommended_packs,
             recommended_methods=recommended_methods,
             exploration_packs=exploration_packs,
+            focus_scores=[item.to_dict() for item in focus_scores],
             pack_scores=[item.to_dict() for item in pack_scores],
+            warnings=warnings,
+            errors=errors,
+            fallback_used=fallback_used,
             json_path=str(self.output_json_path),
             markdown_path=str(self.output_markdown_path),
         )
@@ -212,8 +343,10 @@ class StrategyIntelligenceAnalyzer:
         self.output_markdown_path.write_text(self._build_markdown(summary), encoding="utf-8")
         return summary
 
-    def _recent_profile_runs(self, profile_name: str) -> list[Path]:
+    def _recent_profile_runs(self, profile_name: str, *, warnings: list[str] | None = None) -> list[Path]:
         if not self.runs_root.exists():
+            if warnings is not None:
+                warnings.append("runs_root_missing")
             return []
         runs = sorted(
             [path for path in self.runs_root.iterdir() if path.is_dir() and path != self.run_dir],
@@ -230,7 +363,7 @@ class StrategyIntelligenceAnalyzer:
                 break
         return selected
 
-    def _score_run(self, run_path: Path, profile_name: str) -> dict | None:
+    def _score_run(self, run_path: Path, profile_name: str, *, warnings: list[str] | None = None) -> dict | None:
         run_data = self._read_json(run_path / "run.json")
         if str(run_data.get("profile_name", "")) != profile_name:
             return None
@@ -243,6 +376,8 @@ class StrategyIntelligenceAnalyzer:
         focus = str(decision.get("next_cycle_focus", "")).strip()
         strategy_pack = str(decision.get("recommended_strategy_pack", "")).strip()
         if not focus or not strategy_pack:
+            if warnings is not None:
+                warnings.append(f"skip_run_missing_focus_or_pack:{run_path.name}")
             return None
 
         signals = deep_hunt.get("signals", []) if isinstance(deep_hunt, dict) else []
@@ -306,7 +441,6 @@ class StrategyIntelligenceAnalyzer:
     def _pick_exploration_pack(
         self,
         *,
-        focus: str,
         candidates: list[StrategyPackScore],
         recent_history: list[dict],
     ) -> StrategyPackScore | None:
@@ -355,6 +489,37 @@ class StrategyIntelligenceAnalyzer:
                 return candidate
         return None
 
+    def _pick_exploration_focus(self, candidates: list[FocusScore]) -> FocusScore | None:
+        if len(candidates) < 2:
+            return None
+        ranked = sorted(
+            candidates,
+            key=lambda item: (
+                -(item.average_score + item.efficiency_score),
+                -item.positive_run_ratio,
+                item.average_requests,
+                item.focus,
+            ),
+        )
+        best = ranked[0]
+        if best.efficiency_score >= 1.0 and best.positive_run_ratio >= 0.5 and best.low_value_runs <= 1:
+            return None
+        for candidate in ranked[1:]:
+            if candidate.efficiency_score >= 0.4 or candidate.positive_run_ratio >= 0.34:
+                return candidate
+        return None
+
+    def _focus_group(self, focus: str) -> str:
+        mapping = {
+            "session_boundary_recon": "passive_surface_expansion",
+            "api_boundary_recon": "passive_surface_expansion",
+            "developer_surface_recon": "passive_surface_expansion",
+            "boundary_hotspot_recon": "boundary_validation",
+            "manual_auth_diff": "manual_boundary_validation",
+            "human_review": "terminal_review",
+        }
+        return mapping.get(str(focus).strip(), "")
+
     def _build_markdown(self, summary: StrategyIntelligenceSummary) -> str:
         lines: list[str] = []
         lines.append("# Strategy Intelligence")
@@ -363,9 +528,25 @@ class StrategyIntelligenceAnalyzer:
         lines.append("")
         lines.append(f"- **Profile:** `{summary.profile_name}`")
         lines.append(f"- **Recent Runs Considered:** `{summary.recent_run_count}` / `{summary.run_window}`")
+        lines.append(f"- **Recommended Focuses:** `{summary.recommended_focuses}`")
+        lines.append(f"- **Exploration Focuses:** `{summary.exploration_focuses}`")
         lines.append(f"- **Recommended Packs:** `{summary.recommended_packs}`")
         lines.append(f"- **Exploration Packs:** `{summary.exploration_packs}`")
+        lines.append(f"- **Warnings:** `{summary.warnings}`")
+        lines.append(f"- **Errors:** `{summary.errors}`")
+        lines.append(f"- **Fallback Used:** `{summary.fallback_used}`")
         lines.append("")
+        if summary.focus_scores:
+            lines.append("## Focus Scores")
+            lines.append("")
+            for item in summary.focus_scores:
+                lines.append(
+                    f"- group=`{item['focus_group']}` focus=`{item['focus']}` "
+                    f"avg=`{item['average_score']}` eff=`{item['efficiency_score']}` "
+                    f"req_avg=`{item['average_requests']}` low_value_runs=`{item['low_value_runs']}` "
+                    f"top_pack=`{item['top_strategy_pack']}`"
+                )
+            lines.append("")
         if summary.pack_scores:
             lines.append("## Pack Scores")
             lines.append("")
