@@ -78,6 +78,7 @@ class RunEvaluation:
     recommended_method_sequence: list[str]
     strategy_source: str
     strategy_support_runs: int
+    exploration_pack: str
     review_queue_start_now: int
     review_queue_manual_review: int
     final_report_items: int
@@ -659,6 +660,7 @@ class AutonomousAgent:
             recommended_method_sequence=list(decision_summary.recommended_method_sequence),
             strategy_source=decision_summary.strategy_source,
             strategy_support_runs=decision_summary.strategy_support_runs,
+            exploration_pack=decision_summary.exploration_pack,
             review_queue_start_now=review_queue_start_now,
             review_queue_manual_review=int(review_queue.get("manual_review_count", 0)),
             final_report_items=int(final_report.get("report_draft_items", 0)),
@@ -722,6 +724,7 @@ class AutonomousAgent:
             lines.append(f"- **Recommended Method Sequence:** `{evaluation.recommended_method_sequence}`")
             lines.append(f"- **Strategy Source:** `{evaluation.strategy_source}`")
             lines.append(f"- **Strategy Support Runs:** `{evaluation.strategy_support_runs}`")
+            lines.append(f"- **Exploration Pack:** `{evaluation.exploration_pack}`")
             lines.append(f"- **Review Queue Start Now:** `{evaluation.review_queue_start_now}`")
             lines.append(f"- **Manual Review Items:** `{evaluation.review_queue_manual_review}`")
             lines.append(f"- **Final Report Candidates:** `{evaluation.final_report_candidates}`")
@@ -1096,6 +1099,8 @@ class AutonomousAgent:
         print_status("info", f"Strategy pack: {evaluation.recommended_strategy_pack}")
         print_status("info", f"Strategy source: {evaluation.strategy_source}")
         print_status("info", f"Strategy support runs: {evaluation.strategy_support_runs}")
+        if evaluation.exploration_pack:
+            print_status("info", f"Exploration pack: {evaluation.exploration_pack}")
         if evaluation.recommended_signal_type:
             print_status("info", f"Recommended signal type: {evaluation.recommended_signal_type}")
         if evaluation.manual_approval_recommended:

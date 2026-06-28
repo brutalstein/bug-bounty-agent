@@ -267,6 +267,7 @@ class ArtifactIndexBuilder:
             lines.append(f"- **Autonomous Signal Type:** `{autonomous_decision.get('recommended_signal_type', '')}`")
             lines.append(f"- **Autonomous Strategy Source:** `{autonomous_decision.get('strategy_source', '')}`")
             lines.append(f"- **Autonomous Strategy Support Runs:** `{autonomous_decision.get('strategy_support_runs', 0)}`")
+            lines.append(f"- **Autonomous Exploration Pack:** `{autonomous_decision.get('exploration_pack', '')}`")
             if autonomous_decision.get("manual_approval_recommended"):
                 lines.append(f"- **Manual Approval Next Step:** `{autonomous_decision.get('manual_approval_command', '')}`")
         if strategy_intelligence:

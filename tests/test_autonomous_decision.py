@@ -90,6 +90,7 @@ def test_autonomous_decision_recommends_boundary_focus(tmp_path):
         "cache_auth_boundary_investigator",
         "readonly_variant_matrix_review",
     ]
+    assert summary.strategy_source in {"focus_default", "learned_method_bias", "learned_recent_runs"}
     assert summary.recommended_targets
 
 
@@ -155,4 +156,5 @@ def test_autonomous_decision_stops_for_manual_approval_threshold(tmp_path):
     assert summary.manual_approval_recommended is True
     assert summary.recommended_strategy_pack == "manual_auth_boundary_diff"
     assert summary.recommended_signal_type == "SENSITIVE_DATA"
+    assert summary.exploration_pack in {"", "boundary_cache_auth_investigator"}
     assert "session-compare-run" in summary.manual_approval_command

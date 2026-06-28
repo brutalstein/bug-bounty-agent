@@ -42,6 +42,7 @@ class AutonomousDecisionSummary:
     recommended_method_sequence: list[str]
     strategy_source: str
     strategy_support_runs: int
+    exploration_pack: str
     recommended_targets: list[str]
     strongest_hotspots: list[dict]
     rationale: list[str]
@@ -91,6 +92,7 @@ class AutonomousDecisionEngine:
         recommended_method_sequence: list[str] = []
         strategy_source = "focus_default"
         strategy_support_runs = 0
+        exploration_pack = ""
         rationale: list[str] = []
 
         strongest_hotspot = hotspots[0] if hotspots else None
@@ -199,6 +201,7 @@ class AutonomousDecisionEngine:
             recommended_method_sequence,
             strategy_source,
             strategy_support_runs,
+            exploration_pack,
         ) = self._apply_strategy_learning(
             next_cycle_focus=next_cycle_focus,
             recommended_strategy_pack=recommended_strategy_pack,
@@ -224,6 +227,7 @@ class AutonomousDecisionEngine:
             recommended_method_sequence=recommended_method_sequence,
             strategy_source=strategy_source,
             strategy_support_runs=strategy_support_runs,
+            exploration_pack=exploration_pack,
             recommended_targets=recommended_targets,
             strongest_hotspots=[item.to_dict() for item in hotspots[:5]],
             rationale=rationale,
@@ -368,7 +372,7 @@ class AutonomousDecisionEngine:
         recommended_strategy_pack: str,
         recommended_method_sequence: list[str],
         strategy_intelligence,
-    ) -> tuple[str, list[str], str, int]:
+    ) -> tuple[str, list[str], str, int, str]:
         compatible_packs = {
             "boundary_hotspot_recon": {"boundary_cache_auth_investigator", "session_boundary_mapper"},
             "session_boundary_recon": {"session_boundary_mapper", "boundary_cache_auth_investigator"},
@@ -377,17 +381,26 @@ class AutonomousDecisionEngine:
         }
         recommended_packs = getattr(strategy_intelligence, "recommended_packs", {}) or {}
         recommended_methods = getattr(strategy_intelligence, "recommended_methods", {}) or {}
+        exploration_packs = getattr(strategy_intelligence, "exploration_packs", {}) or {}
 
         selected_pack = recommended_strategy_pack
         selected_methods = list(recommended_method_sequence)
         strategy_source = "focus_default"
         support_runs = 0
+        exploration_pack = str(exploration_packs.get(next_cycle_focus, "")).strip()
 
         learned_pack = str(recommended_packs.get(next_cycle_focus, "")).strip()
         if learned_pack and learned_pack in compatible_packs.get(next_cycle_focus, {learned_pack}):
             selected_pack = learned_pack
             strategy_source = "learned_recent_runs"
             support_runs = self._strategy_pack_support(strategy_intelligence, next_cycle_focus, learned_pack)
+
+        if exploration_pack and exploration_pack in compatible_packs.get(next_cycle_focus, {exploration_pack}):
+            recent_pack = self._recent_focus_pack(strategy_intelligence, next_cycle_focus)
+            if recent_pack and recent_pack == selected_pack and support_runs <= 1:
+                selected_pack = exploration_pack
+                strategy_source = "exploration_rebalance"
+                support_runs = self._strategy_pack_support(strategy_intelligence, next_cycle_focus, exploration_pack)
 
         learned_methods = [
             str(item).strip()
@@ -407,7 +420,7 @@ class AutonomousDecisionEngine:
                 strategy_source = "learned_method_bias"
                 support_runs = max(support_runs, 1)
 
-        return selected_pack, selected_methods, strategy_source, support_runs
+        return selected_pack, selected_methods, strategy_source, support_runs, exploration_pack
 
     def _strategy_pack_support(self, strategy_intelligence, focus: str, strategy_pack: str) -> int:
         pack_scores = getattr(strategy_intelligence, "pack_scores", []) or []
@@ -417,6 +430,17 @@ class AutonomousDecisionEngine:
             if str(item.get("focus", "")) == focus and str(item.get("strategy_pack", "")) == strategy_pack:
                 return int(item.get("runs", 0))
         return 0
+
+    def _recent_focus_pack(self, strategy_intelligence, focus: str) -> str:
+        pack_scores = getattr(strategy_intelligence, "pack_scores", []) or []
+        matching = [
+            item for item in pack_scores
+            if isinstance(item, dict) and str(item.get("focus", "")) == focus
+        ]
+        if not matching:
+            return ""
+        latest = sorted(matching, key=lambda item: str(item.get("last_used_at", "")), reverse=True)[0]
+        return str(latest.get("strategy_pack", "")).strip()
 
     def _top_signal_type(self, signals: dict) -> str:
         for item in signals.get("signals", []):
@@ -496,6 +520,7 @@ class AutonomousDecisionEngine:
         lines.append(f"- **Recommended Method Sequence:** `{summary.recommended_method_sequence}`")
         lines.append(f"- **Strategy Source:** `{summary.strategy_source}`")
         lines.append(f"- **Strategy Support Runs:** `{summary.strategy_support_runs}`")
+        lines.append(f"- **Exploration Pack:** `{summary.exploration_pack}`")
         lines.append("")
         if summary.rationale:
             lines.append("## Rationale")

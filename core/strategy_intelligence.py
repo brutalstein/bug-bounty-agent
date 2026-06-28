@@ -15,9 +15,15 @@ class StrategyPackScore:
     runs: int
     total_score: int
     average_score: float
+    positive_run_ratio: float
     escalations: int
     candidate_hits: int
     positive_signals: int
+    total_requests: int
+    average_requests: float
+    average_error_rate: float
+    efficiency_score: float
+    low_value_runs: int
     last_used_at: str
     preferred_methods: list[str]
 
@@ -33,6 +39,7 @@ class StrategyIntelligenceSummary:
     run_window: int
     recommended_packs: dict[str, str]
     recommended_methods: dict[str, list[str]]
+    exploration_packs: dict[str, str]
     pack_scores: list[dict]
     json_path: str
     markdown_path: str
@@ -58,6 +65,7 @@ class StrategyIntelligenceAnalyzer:
         recent_runs = self._recent_profile_runs(profile_name)
 
         aggregates: dict[tuple[str, str], dict] = {}
+        recent_focus_history: dict[str, list[dict]] = {}
         for run_path in recent_runs:
             record = self._score_run(run_path, profile_name)
             if record is None:
@@ -73,6 +81,10 @@ class StrategyIntelligenceAnalyzer:
                     "escalations": 0,
                     "candidate_hits": 0,
                     "positive_signals": 0,
+                    "positive_runs": 0,
+                    "total_requests": 0,
+                    "error_rate_sum": 0.0,
+                    "low_value_runs": 0,
                     "last_used_at": "",
                     "method_weights": {},
                 },
@@ -82,9 +94,23 @@ class StrategyIntelligenceAnalyzer:
             aggregate["escalations"] += int(record["escalations"])
             aggregate["candidate_hits"] += int(record["candidate_hits"])
             aggregate["positive_signals"] += int(record["positive_signals"])
+            aggregate["positive_runs"] += int(record["positive_run"])
+            aggregate["total_requests"] += int(record["request_cost"])
+            aggregate["error_rate_sum"] += float(record["error_rate"])
+            aggregate["low_value_runs"] += int(record["low_value_run"])
             aggregate["last_used_at"] = max(str(aggregate["last_used_at"]), str(record["used_at"]))
             for method, weight in record["method_weights"].items():
                 aggregate["method_weights"][method] = int(aggregate["method_weights"].get(method, 0)) + int(weight)
+            recent_focus_history.setdefault(record["focus"], []).append(
+                {
+                    "strategy_pack": record["strategy_pack"],
+                    "score": int(record["score"]),
+                    "low_value_run": int(record["low_value_run"]),
+                    "request_cost": int(record["request_cost"]),
+                    "error_rate": float(record["error_rate"]),
+                    "used_at": str(record["used_at"]),
+                }
+            )
 
         pack_scores: list[StrategyPackScore] = []
         for aggregate in aggregates.values():
@@ -96,16 +122,33 @@ class StrategyIntelligenceAnalyzer:
                 )[:4]
             ]
             runs = max(int(aggregate["runs"]), 1)
+            total_requests = max(int(aggregate["total_requests"]), 0)
+            average_requests = round(total_requests / runs, 3)
+            average_error_rate = round(float(aggregate["error_rate_sum"]) / runs, 4)
+            positive_run_ratio = round(float(aggregate["positive_runs"]) / runs, 3)
+            average_score = round(float(aggregate["total_score"]) / runs, 3)
+            efficiency_score = round(
+                (average_score * 4.0) / max(average_requests, 1.0)
+                + positive_run_ratio
+                - (average_error_rate * 2.5),
+                3,
+            )
             pack_scores.append(
                 StrategyPackScore(
                     focus=str(aggregate["focus"]),
                     strategy_pack=str(aggregate["strategy_pack"]),
                     runs=runs,
                     total_score=int(aggregate["total_score"]),
-                    average_score=round(float(aggregate["total_score"]) / runs, 3),
+                    average_score=average_score,
+                    positive_run_ratio=positive_run_ratio,
                     escalations=int(aggregate["escalations"]),
                     candidate_hits=int(aggregate["candidate_hits"]),
                     positive_signals=int(aggregate["positive_signals"]),
+                    total_requests=total_requests,
+                    average_requests=average_requests,
+                    average_error_rate=average_error_rate,
+                    efficiency_score=efficiency_score,
+                    low_value_runs=int(aggregate["low_value_runs"]),
                     last_used_at=str(aggregate["last_used_at"]),
                     preferred_methods=preferred_methods,
                 )
@@ -114,7 +157,7 @@ class StrategyIntelligenceAnalyzer:
         pack_scores.sort(
             key=lambda item: (
                 item.focus,
-                -item.average_score,
+                -(item.average_score + item.efficiency_score),
                 -item.runs,
                 -item.total_score,
                 item.strategy_pack,
@@ -123,18 +166,32 @@ class StrategyIntelligenceAnalyzer:
 
         recommended_packs: dict[str, str] = {}
         recommended_methods: dict[str, list[str]] = {}
+        exploration_packs: dict[str, str] = {}
         for focus in sorted({item.focus for item in pack_scores}):
             candidates = [item for item in pack_scores if item.focus == focus]
             if not candidates:
                 continue
             best = sorted(
                 candidates,
-                key=lambda item: (-item.average_score, -item.runs, -item.total_score, item.strategy_pack),
+                key=lambda item: (
+                    -(item.average_score + item.efficiency_score),
+                    -item.positive_run_ratio,
+                    -item.runs,
+                    -item.total_score,
+                    item.strategy_pack,
+                ),
             )[0]
             if best.runs >= 2 or best.total_score >= 5 or best.escalations > 0:
                 recommended_packs[focus] = best.strategy_pack
                 if best.preferred_methods:
                     recommended_methods[focus] = list(best.preferred_methods)
+            alternate = self._pick_exploration_pack(
+                focus=focus,
+                candidates=candidates,
+                recent_history=recent_focus_history.get(focus, []),
+            )
+            if alternate is not None:
+                exploration_packs[focus] = alternate.strategy_pack
 
         summary = StrategyIntelligenceSummary(
             profile_name=profile_name,
@@ -143,6 +200,7 @@ class StrategyIntelligenceAnalyzer:
             run_window=self.max_recent_runs,
             recommended_packs=recommended_packs,
             recommended_methods=recommended_methods,
+            exploration_packs=exploration_packs,
             pack_scores=[item.to_dict() for item in pack_scores],
             json_path=str(self.output_json_path),
             markdown_path=str(self.output_markdown_path),
@@ -180,6 +238,7 @@ class StrategyIntelligenceAnalyzer:
         deep_hunt = self._read_json(run_path / "parsed" / "deep_hunt.json")
         final_report = self._read_json(run_path / "parsed" / "final_report_draft.json")
         review_queue = self._read_json(run_path / "parsed" / "review_queue.json")
+        request_budget = self._read_json(run_path / "parsed" / "request_budget.json")
 
         focus = str(decision.get("next_cycle_focus", "")).strip()
         strategy_pack = str(decision.get("recommended_strategy_pack", "")).strip()
@@ -216,6 +275,8 @@ class StrategyIntelligenceAnalyzer:
         )
         start_now = int(review_queue.get("start_now_count", 0))
         boundary_hotspots = int(decision.get("boundary_hotspot_count", 0))
+        request_cost = max(int(request_budget.get("total_requests", 0)), 1)
+        error_rate = float(request_budget.get("error_rate", 0.0))
 
         score = 0
         score += positive_signals * 2
@@ -224,6 +285,8 @@ class StrategyIntelligenceAnalyzer:
         score += min(start_now, 4)
         score += boundary_hotspots * 2
         score -= min(ruled_out, 3)
+        low_value_run = int(positive_signals == 0 and escalations == 0 and candidate_hits == 0)
+        positive_run = int(positive_signals > 0 or escalations > 0 or candidate_hits > 0)
 
         return {
             "focus": focus,
@@ -232,9 +295,65 @@ class StrategyIntelligenceAnalyzer:
             "escalations": escalations,
             "candidate_hits": candidate_hits,
             "positive_signals": positive_signals,
+            "positive_run": positive_run,
+            "low_value_run": low_value_run,
+            "request_cost": request_cost,
+            "error_rate": error_rate,
             "used_at": str(run_data.get("started_at", "")),
             "method_weights": method_weights,
         }
+
+    def _pick_exploration_pack(
+        self,
+        *,
+        focus: str,
+        candidates: list[StrategyPackScore],
+        recent_history: list[dict],
+    ) -> StrategyPackScore | None:
+        if len(candidates) < 2:
+            return None
+
+        recent_sorted = [item for item in recent_history if isinstance(item, dict)]
+        repeated_stale = False
+        stale_pack = ""
+        if len(recent_sorted) >= 2:
+            recent_window = recent_sorted[:3]
+            pack_buckets: dict[str, list[dict]] = {}
+            for item in recent_window:
+                pack = str(item.get("strategy_pack", "")).strip()
+                if not pack:
+                    continue
+                pack_buckets.setdefault(pack, []).append(item)
+            for pack, items in pack_buckets.items():
+                if len(items) < 2:
+                    continue
+                if all(int(item.get("low_value_run", 0)) == 1 for item in items[:2]):
+                    repeated_stale = True
+                    stale_pack = pack
+                    break
+
+        ranked = sorted(
+            candidates,
+            key=lambda item: (
+                -(item.average_score + item.efficiency_score),
+                -item.positive_run_ratio,
+                item.average_requests,
+                item.strategy_pack,
+            ),
+        )
+        best = ranked[0]
+        if not repeated_stale and best.efficiency_score >= 1.0 and best.positive_run_ratio >= 0.5:
+            return None
+
+        if repeated_stale and stale_pack:
+            for candidate in ranked:
+                if candidate.strategy_pack != stale_pack:
+                    return candidate
+
+        for candidate in ranked[1:]:
+            if candidate.efficiency_score >= 0.4 or candidate.positive_run_ratio >= 0.34:
+                return candidate
+        return None
 
     def _build_markdown(self, summary: StrategyIntelligenceSummary) -> str:
         lines: list[str] = []
@@ -245,6 +364,7 @@ class StrategyIntelligenceAnalyzer:
         lines.append(f"- **Profile:** `{summary.profile_name}`")
         lines.append(f"- **Recent Runs Considered:** `{summary.recent_run_count}` / `{summary.run_window}`")
         lines.append(f"- **Recommended Packs:** `{summary.recommended_packs}`")
+        lines.append(f"- **Exploration Packs:** `{summary.exploration_packs}`")
         lines.append("")
         if summary.pack_scores:
             lines.append("## Pack Scores")
@@ -252,7 +372,8 @@ class StrategyIntelligenceAnalyzer:
             for item in summary.pack_scores:
                 lines.append(
                     f"- focus=`{item['focus']}` pack=`{item['strategy_pack']}` "
-                    f"avg=`{item['average_score']}` runs=`{item['runs']}` "
+                    f"avg=`{item['average_score']}` eff=`{item['efficiency_score']}` runs=`{item['runs']}` "
+                    f"req_avg=`{item['average_requests']}` err_avg=`{item['average_error_rate']}` "
                     f"positive_signals=`{item['positive_signals']}` methods=`{item['preferred_methods']}`"
                 )
             lines.append("")
