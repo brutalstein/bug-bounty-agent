@@ -83,6 +83,13 @@ def test_autonomous_decision_recommends_boundary_focus(tmp_path):
     assert summary.decision == "continue_with_boundary_focus"
     assert summary.next_cycle_focus == "boundary_hotspot_recon"
     assert summary.boundary_hotspot_count == 1
+    assert summary.recommended_strategy_pack == "boundary_cache_auth_investigator"
+    assert summary.recommended_signal_type == "BROKEN_ACCESS_CONTROL"
+    assert summary.recommended_method_sequence[:3] == [
+        "session_boundary_evidence_review",
+        "cache_auth_boundary_investigator",
+        "readonly_variant_matrix_review",
+    ]
     assert summary.recommended_targets
 
 
@@ -146,4 +153,6 @@ def test_autonomous_decision_stops_for_manual_approval_threshold(tmp_path):
     assert summary.decision == "pause_for_manual_approval"
     assert summary.should_stop is True
     assert summary.manual_approval_recommended is True
+    assert summary.recommended_strategy_pack == "manual_auth_boundary_diff"
+    assert summary.recommended_signal_type == "SENSITIVE_DATA"
     assert "session-compare-run" in summary.manual_approval_command

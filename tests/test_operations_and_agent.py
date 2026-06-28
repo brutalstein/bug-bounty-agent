@@ -109,3 +109,120 @@ def test_agent_state_trace_writing(tmp_path):
         assert payload[0]["state_name"] == "TEST"
     finally:
         Path(ctx.run_dir).rename(tmp_path / Path(ctx.run_dir).name)
+
+
+def test_decision_driven_plan_carries_strategy_pack(tmp_path):
+    scope = ScopeManager("configs/scope.yaml", profile_name="airtable-staging-public-h1")
+    agent = AutonomousAgent(".")
+    run_dir = tmp_path / "run-strategy"
+    (run_dir / "parsed").mkdir(parents=True)
+    (run_dir / "parsed" / "autonomous_decision.json").write_text(
+        json.dumps(
+            {
+                "recommended_targets": [
+                    "https://api-staging.airtable.com",
+                    "https://api-staging.airtable.com/v0",
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    synthetic = {
+        "run_dir": str(run_dir),
+        "dashboard_path": str(run_dir / "reports" / "index.md"),
+        "flow_name": "surface-recon",
+        "potential_high_signal": False,
+        "stop_reason": "boundary_hotspots_need_more_passive_context",
+        "decision": "continue_with_boundary_focus",
+        "next_cycle_focus": "boundary_hotspot_recon",
+        "highest_priority_target": "https://api-staging.airtable.com/v0/meta",
+        "boundary_hotspot_count": 1,
+        "manual_approval_recommended": False,
+        "manual_approval_command": "",
+        "recommended_strategy_pack": "boundary_cache_auth_investigator",
+        "recommended_signal_type": "BROKEN_ACCESS_CONTROL",
+        "recommended_method_sequence": [
+            "session_boundary_evidence_review",
+            "cache_auth_boundary_investigator",
+        ],
+        "review_queue_start_now": 1,
+        "review_queue_manual_review": 2,
+        "final_report_items": 0,
+        "final_report_candidates": 0,
+        "signals_total": 1,
+        "signals_high_or_critical": 0,
+        "deep_hunt_escalated": 0,
+        "deep_hunt_ruled_out": 0,
+        "top_signal_types": ["BROKEN_ACCESS_CONTROL"],
+    }
+    from core.autonomous_agent import RunEvaluation
+
+    plan = agent._decision_driven_plan(  # noqa: SLF001
+        scope,
+        RunEvaluation(**synthetic),
+        used_targets=[],
+    )
+
+    assert plan is not None
+    follow_up = plan["follow_ups"][1]
+    assert follow_up["kind"] == "deep_hunt"
+    assert follow_up["strategy_pack"] == "boundary_cache_auth_investigator"
+    assert follow_up["signal_type"] == "BROKEN_ACCESS_CONTROL"
+    assert follow_up["preferred_methods"][:2] == [
+        "session_boundary_evidence_review",
+        "cache_auth_boundary_investigator",
+    ]
+
+
+def test_apply_decision_strategy_to_plan_updates_deep_hunt_follow_up():
+    agent = AutonomousAgent(".")
+    from core.autonomous_agent import RunEvaluation
+
+    evaluation = RunEvaluation(
+        run_dir="runs/synthetic",
+        dashboard_path="runs/synthetic/reports/index.md",
+        flow_name="surface-recon",
+        potential_high_signal=False,
+        stop_reason="signals_detected_but_low_priority",
+        decision="continue_with_surface_expansion",
+        next_cycle_focus="session_boundary_recon",
+        highest_priority_target="",
+        boundary_hotspot_count=0,
+        manual_approval_recommended=False,
+        manual_approval_command="",
+        recommended_strategy_pack="session_boundary_mapper",
+        recommended_signal_type="INFO_DISCLOSURE",
+        recommended_method_sequence=[
+            "session_boundary_evidence_review",
+            "readonly_variant_matrix_review",
+        ],
+        review_queue_start_now=1,
+        review_queue_manual_review=2,
+        final_report_items=0,
+        final_report_candidates=0,
+        signals_total=1,
+        signals_high_or_critical=0,
+        deep_hunt_escalated=0,
+        deep_hunt_ruled_out=0,
+        top_signal_types=["INFO_DISCLOSURE"],
+    )
+    plan = {
+        "flow_name": "surface-recon",
+        "label": "Authorized session-boundary passive recon",
+        "targets": ["https://staging.airtable.com", "https://api-staging.airtable.com"],
+        "follow_ups": [
+            {"label": "Signal detection refresh", "kind": "signals"},
+            {"label": "Policy-safe deep hunt refresh", "kind": "deep_hunt"},
+        ],
+    }
+
+    updated = agent._apply_decision_strategy_to_plan(plan, evaluation)  # noqa: SLF001
+
+    assert updated is not plan
+    follow_up = updated["follow_ups"][1]
+    assert follow_up["signal_type"] == "INFO_DISCLOSURE"
+    assert follow_up["strategy_pack"] == "session_boundary_mapper"
+    assert follow_up["preferred_methods"] == [
+        "session_boundary_evidence_review",
+        "readonly_variant_matrix_review",
+    ]

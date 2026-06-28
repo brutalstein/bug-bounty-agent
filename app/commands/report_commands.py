@@ -210,7 +210,12 @@ def command_deep_hunt(args: argparse.Namespace) -> int:
     hunter = DeepHunter(scope=scope, run_context=ctx)
     deep_summary = run_step(
         "Running policy-safe deep hunt",
-        lambda: hunter.run(signal_type=args.signal_type, max_signals=args.max_signals),
+        lambda: hunter.run(
+            signal_type=args.signal_type,
+            max_signals=args.max_signals,
+            strategy_pack=getattr(args, "strategy_pack", None),
+            preferred_methods=getattr(args, "preferred_methods", []),
+        ),
         "Deep hunt completed",
     )
     refresh_summary = refresh_run_artifacts(run_dir, mode="reporting")
@@ -249,7 +254,12 @@ def command_hunt(args: argparse.Namespace) -> int:
     hunter = DeepHunter(scope=scope, run_context=ctx)
     deep_summary = run_step(
         "Running policy-safe deep hunt",
-        lambda: hunter.run(signal_type=args.signal_type, max_signals=args.max_signals),
+        lambda: hunter.run(
+            signal_type=args.signal_type,
+            max_signals=args.max_signals,
+            strategy_pack=getattr(args, "strategy_pack", None),
+            preferred_methods=getattr(args, "preferred_methods", []),
+        ),
         "Deep hunt completed",
     )
     refresh_summary = refresh_run_artifacts(run_dir, mode="reporting")

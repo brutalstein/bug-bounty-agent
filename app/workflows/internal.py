@@ -53,12 +53,16 @@ def run_deep_hunt_internal(
     *,
     signal_type: str | None = None,
     max_signals: int = 10,
+    strategy_pack: str | None = None,
+    preferred_methods: list[str] | None = None,
 ) -> int:
     return command_deep_hunt(
         argparse.Namespace(
             run_dir=str(run_dir),
             signal_type=signal_type,
             max_signals=max_signals,
+            strategy_pack=strategy_pack,
+            preferred_methods=preferred_methods or [],
         )
     )
 

@@ -258,6 +258,8 @@ class ArtifactIndexBuilder:
             lines.append(f"- **Autonomous Decision:** `{autonomous_decision.get('decision', '')}`")
             lines.append(f"- **Autonomous Next Focus:** `{autonomous_decision.get('next_cycle_focus', '')}`")
             lines.append(f"- **Boundary Hotspots:** `{autonomous_decision.get('boundary_hotspot_count', 0)}`")
+            lines.append(f"- **Autonomous Strategy Pack:** `{autonomous_decision.get('recommended_strategy_pack', '')}`")
+            lines.append(f"- **Autonomous Signal Type:** `{autonomous_decision.get('recommended_signal_type', '')}`")
             if autonomous_decision.get("manual_approval_recommended"):
                 lines.append(f"- **Manual Approval Next Step:** `{autonomous_decision.get('manual_approval_command', '')}`")
         if request_budget:

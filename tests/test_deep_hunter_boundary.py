@@ -161,3 +161,100 @@ def test_deep_hunter_skips_boundary_methods_without_session_context(tmp_path):
         assert "readonly_variant_matrix_review" not in methods
     finally:
         Path(ctx.run_dir).rename(tmp_path / Path(ctx.run_dir).name)
+
+
+def test_deep_hunter_prefers_decision_method_sequence(tmp_path):
+    ctx = create_run_context(
+        target_name="airtable-staging-public-h1",
+        target_url="https://api-staging.airtable.com/v0/meta/bases",
+        mode="authorized",
+        profile_name="airtable-staging-public-h1",
+        program_name="Airtable HackerOne Bug Bounty",
+        program_url="https://hackerone.com/airtable",
+        authorization_kind="public_bug_bounty_policy",
+        authorization_confirmed=True,
+    )
+    try:
+        run_dir = Path(ctx.run_dir)
+        parsed_dir = run_dir / "parsed"
+        reports_dir = run_dir / "reports"
+        parsed_dir.mkdir(parents=True, exist_ok=True)
+        reports_dir.mkdir(parents=True, exist_ok=True)
+
+        (parsed_dir / "signals.json").write_text(
+            json.dumps(
+                {
+                    "signals": [
+                        {
+                            "signal_id": "sig-3",
+                            "signal_type": "BROKEN_ACCESS_CONTROL",
+                            "endpoint": "https://api-staging.airtable.com/v0/meta/bases",
+                            "method": "GET",
+                            "priority": "MEDIUM",
+                            "confidence": 0.52,
+                            "bounty_potential": "$$",
+                            "investigation_budget": 1,
+                            "status": "pending",
+                            "methods_tried": [],
+                            "findings": [],
+                            "evidence": {
+                                "matched_rule": "session_compare_access_boundary_changed",
+                                "variant_signal_score": 5,
+                                "variant_findings": [
+                                    "authenticated_response_missing_session_vary",
+                                ],
+                            },
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        (parsed_dir / "session_compare.json").write_text(
+            json.dumps(
+                {
+                    "items": [
+                        {
+                            "url": "https://api-staging.airtable.com/v0/meta/bases",
+                            "variant_signal_score": 5,
+                            "accessibility_changed": True,
+                            "auth_requirement_changed": True,
+                            "cache_validator_reused": False,
+                            "auth_vary_missing": True,
+                            "representation_changed": True,
+                            "method_observations": [],
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        (parsed_dir / "endpoint_validation.json").write_text(json.dumps({"results": []}), encoding="utf-8")
+        (parsed_dir / "ranked_candidates.json").write_text(json.dumps({"ranked_candidates": []}), encoding="utf-8")
+        (parsed_dir / "js_analysis.json").write_text(json.dumps({"assets": []}), encoding="utf-8")
+        (parsed_dir / "passive_surface_diff.json").write_text(json.dumps({"hypotheses": []}), encoding="utf-8")
+        (parsed_dir / "session_surface_compare.json").write_text(json.dumps({"hypotheses": []}), encoding="utf-8")
+
+        hunter = DeepHunter(
+            scope=ScopeManager("configs/scope.yaml", profile_name="airtable-staging-public-h1"),
+            run_context=ctx,
+        )
+        summary = hunter.run(
+            signal_type="BROKEN_ACCESS_CONTROL",
+            max_signals=1,
+            strategy_pack="boundary_cache_auth_investigator",
+            preferred_methods=[
+                "readonly_variant_matrix_review",
+                "cache_auth_boundary_investigator",
+            ],
+        )
+
+        signal = summary.signals[0]
+        assert signal["strategy_pack"] == "boundary_cache_auth_investigator"
+        assert signal["preferred_method_sequence"][:2] == [
+            "readonly_variant_matrix_review",
+            "cache_auth_boundary_investigator",
+        ]
+        assert signal["methods_tried"][0] == "readonly_variant_matrix_review"
+    finally:
+        Path(ctx.run_dir).rename(tmp_path / Path(ctx.run_dir).name)

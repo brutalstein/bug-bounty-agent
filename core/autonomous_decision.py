@@ -35,6 +35,9 @@ class AutonomousDecisionSummary:
     manual_approval_recommended: bool
     manual_approval_reason: str
     manual_approval_command: str
+    recommended_strategy_pack: str
+    recommended_signal_type: str
+    recommended_method_sequence: list[str]
     recommended_targets: list[str]
     strongest_hotspots: list[dict]
     rationale: list[str]
@@ -78,22 +81,30 @@ class AutonomousDecisionEngine:
         manual_approval_recommended = False
         manual_approval_reason = ""
         manual_approval_command = ""
+        recommended_strategy_pack = "surface_expansion_baseline"
+        recommended_signal_type = ""
+        recommended_method_sequence: list[str] = []
         rationale: list[str] = []
 
         strongest_hotspot = hotspots[0] if hotspots else None
         strongest_score = strongest_hotspot.score if strongest_hotspot else 0
+        top_signal_type = self._top_signal_type(signals)
 
         if deep_hunt_escalated > 0 and hotspots:
             decision = "stop_for_human_review"
             stop_reason = "boundary_signal_escalated_for_human_review"
             should_stop = True
             next_cycle_focus = "human_review"
+            recommended_strategy_pack = "human_review_handoff"
+            recommended_signal_type = strongest_hotspot.signal_type if strongest_hotspot else top_signal_type
             rationale.append("Deep hunt escalated a strong read-only boundary signal.")
         elif final_report_candidates > 0:
             decision = "stop_for_human_review"
             stop_reason = "final_report_candidate_ready_for_human_review"
             should_stop = True
             next_cycle_focus = "human_review"
+            recommended_strategy_pack = "human_review_handoff"
+            recommended_signal_type = strongest_hotspot.signal_type if strongest_hotspot else top_signal_type
             rationale.append("A final report candidate is already available for review.")
         elif (
             strongest_score >= 12
@@ -105,6 +116,13 @@ class AutonomousDecisionEngine:
             should_stop = True
             next_cycle_focus = "manual_auth_diff"
             manual_approval_recommended = True
+            recommended_strategy_pack = "manual_auth_boundary_diff"
+            recommended_signal_type = strongest_hotspot.signal_type
+            recommended_method_sequence = [
+                "session_boundary_evidence_review",
+                "cache_auth_boundary_investigator",
+                "readonly_variant_matrix_review",
+            ]
             manual_approval_reason = (
                 "Read-only boundary hotspot is strong enough that the next best step is an authenticated "
                 "read-only diff with explicit manual approval."
@@ -116,24 +134,55 @@ class AutonomousDecisionEngine:
             stop_reason = "boundary_hotspots_need_more_passive_context"
             should_stop = False
             next_cycle_focus = "boundary_hotspot_recon"
+            recommended_strategy_pack = "boundary_cache_auth_investigator"
+            recommended_signal_type = strongest_hotspot.signal_type if strongest_hotspot else top_signal_type
+            recommended_method_sequence = [
+                "session_boundary_evidence_review",
+                "cache_auth_boundary_investigator",
+                "readonly_variant_matrix_review",
+                "cross_surface_context_review",
+            ]
             rationale.append("Strongest current leads are boundary/cache/auth drift hotspots.")
         elif review_queue_start_now > 0:
             decision = "continue_with_surface_expansion"
             stop_reason = "review_queue_contains_start_now_items_but_needs_more_signal"
             should_stop = False
             next_cycle_focus = "session_boundary_recon"
+            recommended_strategy_pack = "session_boundary_mapper"
+            recommended_signal_type = top_signal_type or "INFO_DISCLOSURE"
+            recommended_method_sequence = [
+                "session_boundary_evidence_review",
+                "readonly_variant_matrix_review",
+                "response_shape_review",
+                "route_family_neighbor_review",
+            ]
             rationale.append("Start Now items exist, but none reached boundary-hotspot confidence.")
         elif int(signals.get("high_count", 0)) + int(signals.get("critical_count", 0)) > 0:
             decision = "continue_with_api_focus"
             stop_reason = "high_signal_detected_but_not_yet_escalated"
             should_stop = False
             next_cycle_focus = "api_boundary_recon"
+            recommended_strategy_pack = "api_surface_correlator"
+            recommended_signal_type = top_signal_type
+            recommended_method_sequence = [
+                "context_from_ranked_candidates",
+                "cross_surface_context_review",
+                "route_family_neighbor_review",
+                "safe_reprobe_get",
+            ]
             rationale.append("High or critical signals exist without decisive deep-hunt evidence.")
         elif int(signals.get("total_signals", 0)) > 0:
             decision = "continue_with_surface_expansion"
             stop_reason = "signals_detected_but_low_priority"
             should_stop = False
             next_cycle_focus = "developer_surface_recon"
+            recommended_strategy_pack = "developer_surface_expander"
+            recommended_signal_type = top_signal_type
+            recommended_method_sequence = [
+                "js_context_review",
+                "cross_surface_context_review",
+                "header_policy_review",
+            ]
             rationale.append("Signals exist, but they remain low-priority without stronger auth or cache drift.")
         else:
             rationale.append("No meaningful boundary or exposure signals were found in the current run.")
@@ -151,6 +200,9 @@ class AutonomousDecisionEngine:
             manual_approval_recommended=manual_approval_recommended,
             manual_approval_reason=manual_approval_reason,
             manual_approval_command=manual_approval_command,
+            recommended_strategy_pack=recommended_strategy_pack,
+            recommended_signal_type=recommended_signal_type,
+            recommended_method_sequence=recommended_method_sequence,
             recommended_targets=recommended_targets,
             strongest_hotspots=[item.to_dict() for item in hotspots[:5]],
             rationale=rationale,
@@ -288,6 +340,15 @@ class AutonomousDecisionEngine:
         hotspots.sort(key=lambda item: (-item.score, item.signal_type, item.endpoint))
         return hotspots
 
+    def _top_signal_type(self, signals: dict) -> str:
+        for item in signals.get("signals", []):
+            if not isinstance(item, dict):
+                continue
+            signal_type = str(item.get("signal_type", "")).strip()
+            if signal_type:
+                return signal_type
+        return ""
+
     def _recommended_targets(self, hotspots: list[BoundaryHotspot]) -> list[str]:
         targets: list[str] = []
         seen: set[str] = set()
@@ -352,6 +413,9 @@ class AutonomousDecisionEngine:
             lines.append(f"- **Manual Approval Recommended:** `{summary.manual_approval_recommended}`")
             lines.append(f"- **Why:** `{summary.manual_approval_reason}`")
             lines.append(f"- **Command:** `{summary.manual_approval_command}`")
+        lines.append(f"- **Strategy Pack:** `{summary.recommended_strategy_pack}`")
+        lines.append(f"- **Recommended Signal Type:** `{summary.recommended_signal_type}`")
+        lines.append(f"- **Recommended Method Sequence:** `{summary.recommended_method_sequence}`")
         lines.append("")
         if summary.rationale:
             lines.append("## Rationale")

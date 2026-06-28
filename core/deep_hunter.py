@@ -142,6 +142,8 @@ class DeepHunter:
         self,
         signal_type: str | None = None,
         max_signals: int = MAX_SIGNALS_PER_RUN,
+        strategy_pack: str | None = None,
+        preferred_methods: list[str] | None = None,
     ) -> DeepHuntSummary:
         signal_data = self._read_json(self.parsed_dir / "signals.json")
         raw_signals = signal_data.get("signals", []) if isinstance(signal_data, dict) else []
@@ -166,8 +168,15 @@ class DeepHunter:
             and item.get("evidence", {}).get("llm_candidate") is True
         )
         self.llm_review_budget_limit = max(2, min(10, max(len(selected_signals) * 2, llm_candidate_count * 3)))
+        preferred_order = [str(item).strip() for item in (preferred_methods or []) if str(item).strip()]
         for signal in selected_signals:
-            investigated.append(self._investigate_signal(signal))
+            investigated.append(
+                self._investigate_signal(
+                    signal,
+                    strategy_pack=strategy_pack,
+                    preferred_methods=preferred_order,
+                )
+            )
 
         summary = DeepHuntSummary(
             target=self.ctx.target_url,
@@ -221,12 +230,20 @@ class DeepHunter:
         )
         return summary
 
-    def _investigate_signal(self, signal: dict) -> dict:
+    def _investigate_signal(
+        self,
+        signal: dict,
+        *,
+        strategy_pack: str | None = None,
+        preferred_methods: list[str] | None = None,
+    ) -> dict:
         signal["status"] = "investigating"
         signal.setdefault("methods_tried", [])
         signal.setdefault("findings", [])
         signal.setdefault("llm_notes", [])
         signal.setdefault("signal_id", f"{signal.get('signal_type', 'signal')}::{signal.get('endpoint', 'unknown')}")
+        signal["strategy_pack"] = str(strategy_pack or signal.get("strategy_pack") or "").strip()
+        signal["preferred_method_sequence"] = [str(item) for item in (preferred_methods or []) if str(item).strip()]
         iteration_count = 0
         started_at = time.monotonic()
 
@@ -234,7 +251,11 @@ class DeepHunter:
             signal_key = self._signal_key(signal)
             available_methods = [
                 item
-                for item in self._methods_for_signal(signal)
+                for item in self._methods_for_signal(
+                    signal,
+                    strategy_pack=strategy_pack,
+                    preferred_methods=preferred_methods,
+                )
                 if item not in signal["methods_tried"]
             ]
             if not available_methods:
@@ -311,7 +332,13 @@ class DeepHunter:
             return False
         return True
 
-    def _methods_for_signal(self, signal: dict) -> list[str]:
+    def _methods_for_signal(
+        self,
+        signal: dict,
+        *,
+        strategy_pack: str | None = None,
+        preferred_methods: list[str] | None = None,
+    ) -> list[str]:
         signal_type = str(signal.get("signal_type", "")).upper()
         candidates = list(METHODS_BY_SIGNAL_TYPE.get(signal_type, ["context_from_ranked_candidates"]))
         if not self._has_strong_session_boundary_context(signal):
@@ -324,12 +351,83 @@ class DeepHunter:
                     "readonly_variant_matrix_review",
                 }
             ]
-        return self.strategy_memory.choose_method_order(
+        ordered = self.strategy_memory.choose_method_order(
             signal_key=self._signal_key(signal),
             signal_type=signal_type,
             endpoint_family=self._endpoint_family(str(signal.get("endpoint", ""))),
             available_methods=candidates,
         )
+        return self._apply_strategy_preferences(
+            ordered,
+            strategy_pack=strategy_pack,
+            preferred_methods=preferred_methods,
+        )
+
+    def _apply_strategy_preferences(
+        self,
+        ordered_methods: list[str],
+        *,
+        strategy_pack: str | None = None,
+        preferred_methods: list[str] | None = None,
+    ) -> list[str]:
+        boosted: list[str] = []
+        seen: set[str] = set()
+
+        for method in preferred_methods or []:
+            normalized = str(method).strip()
+            if normalized and normalized in ordered_methods and normalized not in seen:
+                boosted.append(normalized)
+                seen.add(normalized)
+
+        pack_defaults = self._strategy_pack_defaults(strategy_pack)
+        for method in pack_defaults:
+            if method in ordered_methods and method not in seen:
+                boosted.append(method)
+                seen.add(method)
+
+        for method in ordered_methods:
+            if method not in seen:
+                boosted.append(method)
+                seen.add(method)
+
+        return boosted
+
+    def _strategy_pack_defaults(self, strategy_pack: str | None) -> list[str]:
+        pack = str(strategy_pack or "").strip().lower()
+        if pack == "boundary_cache_auth_investigator":
+            return [
+                "session_boundary_evidence_review",
+                "cache_auth_boundary_investigator",
+                "readonly_variant_matrix_review",
+                "cross_surface_context_review",
+            ]
+        if pack == "session_boundary_mapper":
+            return [
+                "session_boundary_evidence_review",
+                "readonly_variant_matrix_review",
+                "response_shape_review",
+                "route_family_neighbor_review",
+            ]
+        if pack == "api_surface_correlator":
+            return [
+                "context_from_ranked_candidates",
+                "cross_surface_context_review",
+                "route_family_neighbor_review",
+                "safe_reprobe_get",
+            ]
+        if pack == "developer_surface_expander":
+            return [
+                "js_context_review",
+                "cross_surface_context_review",
+                "header_policy_review",
+            ]
+        if pack == "manual_auth_boundary_diff":
+            return [
+                "session_boundary_evidence_review",
+                "cache_auth_boundary_investigator",
+                "readonly_variant_matrix_review",
+            ]
+        return []
 
     def _select_next_method(self, signal: dict, available_methods: list[str]) -> str:
         if not self._should_use_llm(signal, stage="method_selection"):

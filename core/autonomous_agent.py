@@ -8,6 +8,7 @@ existing CLI flows, chooses the most ready authorized profile, runs safe
 investigation cycles with bounded budgets, and produces a compact agent summary.
 """
 
+from copy import deepcopy
 from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -72,6 +73,9 @@ class RunEvaluation:
     boundary_hotspot_count: int
     manual_approval_recommended: bool
     manual_approval_command: str
+    recommended_strategy_pack: str
+    recommended_signal_type: str
+    recommended_method_sequence: list[str]
     review_queue_start_now: int
     review_queue_manual_review: int
     final_report_items: int
@@ -261,7 +265,8 @@ class AutonomousAgent:
         while pending_plans and len(evaluations) < max_cycles:
             next_plan = self._select_next_plan(pending_plans, evaluations)
             pending_plans = [item for item in pending_plans if item is not next_plan]
-            plan = next_plan
+            latest_evaluation = evaluations[-1] if evaluations else None
+            plan = self._apply_decision_strategy_to_plan(next_plan, latest_evaluation)
             index = len(evaluations) + 1
             print_status("step", f"Cycle {index}/{len(cycle_plans)}: {plan['label']}")
             self._record_state(
@@ -647,6 +652,9 @@ class AutonomousAgent:
             boundary_hotspot_count=decision_summary.boundary_hotspot_count,
             manual_approval_recommended=decision_summary.manual_approval_recommended,
             manual_approval_command=decision_summary.manual_approval_command,
+            recommended_strategy_pack=decision_summary.recommended_strategy_pack,
+            recommended_signal_type=decision_summary.recommended_signal_type,
+            recommended_method_sequence=list(decision_summary.recommended_method_sequence),
             review_queue_start_now=review_queue_start_now,
             review_queue_manual_review=int(review_queue.get("manual_review_count", 0)),
             final_report_items=int(final_report.get("report_draft_items", 0)),
@@ -705,6 +713,9 @@ class AutonomousAgent:
             lines.append(f"- **Next Cycle Focus:** `{evaluation.next_cycle_focus}`")
             lines.append(f"- **Boundary Hotspots:** `{evaluation.boundary_hotspot_count}`")
             lines.append(f"- **Highest Priority Target:** `{evaluation.highest_priority_target}`")
+            lines.append(f"- **Strategy Pack:** `{evaluation.recommended_strategy_pack}`")
+            lines.append(f"- **Recommended Signal Type:** `{evaluation.recommended_signal_type}`")
+            lines.append(f"- **Recommended Method Sequence:** `{evaluation.recommended_method_sequence}`")
             lines.append(f"- **Review Queue Start Now:** `{evaluation.review_queue_start_now}`")
             lines.append(f"- **Manual Review Items:** `{evaluation.review_queue_manual_review}`")
             lines.append(f"- **Final Report Candidates:** `{evaluation.final_report_candidates}`")
@@ -866,7 +877,13 @@ class AutonomousAgent:
             "targets": filtered_targets,
             "follow_ups": [
                 {"label": "Signal detection refresh", "kind": "signals"},
-                {"label": "Policy-safe deep hunt refresh", "kind": "deep_hunt"},
+                {
+                    "label": "Policy-safe deep hunt refresh",
+                    "kind": "deep_hunt",
+                    "signal_type": evaluation.recommended_signal_type or None,
+                    "strategy_pack": evaluation.recommended_strategy_pack or None,
+                    "preferred_methods": list(evaluation.recommended_method_sequence),
+                },
             ],
         }
 
@@ -876,6 +893,35 @@ class AutonomousAgent:
         if not isinstance(targets, list):
             return []
         return [str(item).strip() for item in targets if str(item).strip() and scope.is_target_allowed(str(item).strip())]
+
+    def _apply_decision_strategy_to_plan(
+        self,
+        plan: dict[str, Any],
+        evaluation: RunEvaluation | None,
+    ) -> dict[str, Any]:
+        if evaluation is None:
+            return plan
+        if not evaluation.recommended_strategy_pack and not evaluation.recommended_method_sequence:
+            return plan
+        if evaluation.next_cycle_focus not in {
+            "boundary_hotspot_recon",
+            "session_boundary_recon",
+            "api_boundary_recon",
+            "developer_surface_recon",
+        }:
+            return plan
+
+        updated = deepcopy(plan)
+        for follow_up in updated.get("follow_ups", []):
+            if str(follow_up.get("kind", "")).strip() != "deep_hunt":
+                continue
+            if evaluation.recommended_signal_type:
+                follow_up["signal_type"] = evaluation.recommended_signal_type
+            if evaluation.recommended_strategy_pack:
+                follow_up["strategy_pack"] = evaluation.recommended_strategy_pack
+            if evaluation.recommended_method_sequence:
+                follow_up["preferred_methods"] = list(evaluation.recommended_method_sequence)
+        return updated
 
     def execute_plan(self, plan: dict[str, Any]) -> None:
         if plan.get("execution") == "internal_surface_recon":
@@ -891,7 +937,12 @@ class AutonomousAgent:
                 return
             raise RuntimeError(f"`{follow_up['label']}` failed.")
         if kind == "deep_hunt":
-            if run_deep_hunt_internal(run_dir) == 0:
+            if run_deep_hunt_internal(
+                run_dir,
+                signal_type=follow_up.get("signal_type"),
+                strategy_pack=follow_up.get("strategy_pack"),
+                preferred_methods=follow_up.get("preferred_methods"),
+            ) == 0:
                 return
             raise RuntimeError(f"`{follow_up['label']}` failed.")
         if kind == "report_refresh":
@@ -1036,6 +1087,9 @@ class AutonomousAgent:
         print_status("info", f"Decision: {evaluation.decision}")
         print_status("info", f"Next cycle focus: {evaluation.next_cycle_focus}")
         print_status("info", f"Boundary hotspots: {evaluation.boundary_hotspot_count}")
+        print_status("info", f"Strategy pack: {evaluation.recommended_strategy_pack}")
+        if evaluation.recommended_signal_type:
+            print_status("info", f"Recommended signal type: {evaluation.recommended_signal_type}")
         if evaluation.manual_approval_recommended:
             print_status("warn", f"Manual approval next step: {evaluation.manual_approval_command}")
         print_status("info", f"Top signal types: {evaluation.top_signal_types or ['none']}")
