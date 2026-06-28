@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date, datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 import fnmatch
@@ -37,6 +38,8 @@ class AuthorizationConfig:
 class PolicyConfig:
     program_name: str
     program_url: str
+    policy_reviewed_at: str
+    policy_max_age_days: int
     allowed_http_methods: list[str]
     requires_manual_approval_for: list[str]
     disallowed_actions: list[str]
@@ -282,6 +285,8 @@ class ScopeManager:
             policy=PolicyConfig(
                 program_name=str(policy.get("program_name", target.get("name", profile_name))),
                 program_url=str(policy.get("program_url", "")),
+                policy_reviewed_at=str(policy.get("policy_reviewed_at", "")).strip(),
+                policy_max_age_days=max(int(policy.get("policy_max_age_days", 30)), 1),
                 allowed_http_methods=[str(item).upper() for item in allowed_methods],
                 requires_manual_approval_for=[
                     str(item) for item in policy.get("requires_manual_approval_for", [])
@@ -507,6 +512,9 @@ class ScopeManager:
             "authorization_evidence": self.config.authorization.evidence,
             "program_name": self.config.policy.program_name,
             "program_url": self.config.policy.program_url,
+            "policy_reviewed_at": self.config.policy.policy_reviewed_at,
+            "policy_max_age_days": self.config.policy.policy_max_age_days,
+            "policy_status": self.policy_status(),
             "method": method.upper(),
             "method_allowed": method_allowed,
             "allowed_http_methods": self.config.policy.allowed_http_methods,
@@ -522,6 +530,9 @@ class ScopeManager:
             "mode": self.effective_mode(),
             "program_name": self.config.policy.program_name,
             "program_url": self.config.policy.program_url,
+            "policy_reviewed_at": self.config.policy.policy_reviewed_at,
+            "policy_max_age_days": self.config.policy.policy_max_age_days,
+            "policy_status": self.policy_status(),
             "authorization": {
                 "kind": self.config.authorization.kind,
                 "confirmed": self.config.authorization.confirmed,
@@ -539,6 +550,52 @@ class ScopeManager:
             "session_profiles": self.list_session_profiles(),
             "allow_port_scan": self.config.rules.allow_port_scan,
         }
+
+    def policy_status(self, now: date | datetime | None = None) -> dict:
+        current_date = self._normalize_policy_date(now) or datetime.now(timezone.utc).date()
+        reviewed_at_raw = self.config.policy.policy_reviewed_at
+        reviewed_at_date = self._parse_policy_date(reviewed_at_raw)
+        max_age_days = max(int(self.config.policy.policy_max_age_days), 1)
+        age_days = None
+        is_stale = True
+        state = "unknown"
+
+        if reviewed_at_date is not None:
+            age_days = max((current_date - reviewed_at_date).days, 0)
+            is_stale = age_days > max_age_days
+            state = "stale" if is_stale else "fresh"
+        elif not reviewed_at_raw:
+            state = "missing_review_date"
+        else:
+            state = "invalid_review_date"
+
+        return {
+            "profile_name": self.config.profile_name,
+            "program_name": self.config.policy.program_name,
+            "program_url": self.config.policy.program_url,
+            "policy_reviewed_at": reviewed_at_raw or "",
+            "policy_max_age_days": max_age_days,
+            "age_days": age_days,
+            "is_stale": is_stale,
+            "state": state,
+            "strict_mode_ready": not is_stale,
+        }
+
+    def _parse_policy_date(self, value: str) -> date | None:
+        raw = str(value).strip()
+        if not raw:
+            return None
+        try:
+            return date.fromisoformat(raw)
+        except ValueError:
+            return None
+
+    def _normalize_policy_date(self, value: date | datetime | None) -> date | None:
+        if value is None:
+            return None
+        if isinstance(value, datetime):
+            return value.date()
+        return value
 
     def assert_port_scan_allowed(self, target: str) -> None:
         host = self.extract_host(target)

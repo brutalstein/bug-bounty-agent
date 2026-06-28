@@ -19,6 +19,12 @@ import re
 import subprocess
 import sys
 
+from app.workflows.internal import (
+    run_deep_hunt_internal,
+    run_report_refresh_internal,
+    run_signals_internal,
+    run_surface_recon_internal,
+)
 from core.console import print_status
 from core.http_client import SafeHttpClient
 from core.lab_manager import LabManager
@@ -114,7 +120,7 @@ class AutonomousAgent:
         self,
         preferred_profile: str | None = None,
         target: str | None = None,
-        max_cycles: int = 2,
+        max_cycles: int = 3,
     ) -> AutonomousAgentSummary:
         config_path = self.project_root / PROFILE_CONFIG_PATH
         self._record_state(
@@ -159,6 +165,32 @@ class AutonomousAgent:
 
         scope = ScopeManager(config_path, profile_name=selected.profile_name)
         selected_target = target or scope.config.base_url
+        policy_status = scope.policy_status()
+        if policy_status.get("is_stale"):
+            message = (
+                f"Policy notes for `{scope.config.profile_name}` are stale "
+                f"(reviewed_at={policy_status.get('policy_reviewed_at')}, age_days={policy_status.get('age_days')}, "
+                f"max_age_days={policy_status.get('policy_max_age_days')})."
+            )
+            if os.getenv("BB_STRICT_POLICY_FRESHNESS", "0").strip() == "1":
+                self._record_state(
+                    state_name="POLICY_FRESHNESS",
+                    status="blocked",
+                    reason=message,
+                    safety_gates_checked=["policy_reviewed_at", "policy_max_age_days"],
+                    errors=["stale_policy_notes"],
+                )
+                raise RuntimeError(
+                    f"{message} Strict mode is enabled, so the default operator will not continue until policy_reviewed_at is refreshed."
+                )
+            print_status("warn", message)
+            self._record_state(
+                state_name="POLICY_FRESHNESS",
+                status="completed",
+                reason=message,
+                safety_gates_checked=["policy_reviewed_at", "policy_max_age_days"],
+                warnings=["stale_policy_notes"],
+            )
         self._prepare_profile(scope, selected)
         self._record_state(
             state_name="POLICY_VERIFY",
@@ -226,7 +258,7 @@ class AutonomousAgent:
                 artifact_inputs=plan["argv"],
             )
             previous_runs = {str(path) for path in self.list_run_dirs()}
-            self.run_cli_command(plan["argv"], label=plan["label"])
+            self.execute_plan(plan)
             run_dir = self.find_new_run_dir(previous_runs)
 
             if run_dir is None:
@@ -235,15 +267,26 @@ class AutonomousAgent:
                 )
 
             for follow_up in plan.get("follow_ups", []):
-                follow_up_argv = [item.format(run_dir=str(run_dir)) for item in follow_up["argv"]]
                 print_status("step", f"Follow-up: {follow_up['label']}")
-                self.run_cli_command(follow_up_argv, label=follow_up["label"])
+                self.execute_follow_up(follow_up, run_dir)
 
             evaluation = self.evaluate_run(run_dir, plan["flow_name"])
             evaluations.append(evaluation)
             self._print_run_evaluation(evaluation)
             self.write_agent_summary(run_dir, evaluations, selected.profile_name, selected_target)
             self.write_agent_state_trace(run_dir)
+            self._record_state(
+                state_name="RUN_EVALUATION",
+                status="completed",
+                reason=f"Evaluated `{plan['label']}`.",
+                safety_gates_checked=["artifact_dashboard_present", "signal_summary_present"],
+                request_budget_used=self._read_request_budget_used(run_dir),
+                artifact_outputs=[
+                    str(run_dir / "parsed" / "request_budget.json"),
+                    str(run_dir / "parsed" / "signals.json"),
+                    str(run_dir / "reports" / "index.md"),
+                ],
+            )
 
             if evaluation.potential_high_signal:
                 stop_reason = evaluation.stop_reason
@@ -434,50 +477,94 @@ class AutonomousAgent:
             return plans[:max_cycles]
 
         if len(derived_targets) >= 2:
+            api_mix = self._select_target_mix(
+                derived_targets,
+                preferred_keywords=["api", "graphql", "developers", "meta"],
+            )
             plans.append(
                 {
                     "flow_name": "surface-recon",
-                    "label": "Authorized passive surface recon",
+                    "label": "Authorized API-first passive recon",
                     "argv": [
                         "surface-recon",
                         "--profile",
                         scope.config.profile_name,
-                        *derived_targets[:3],
+                        *(api_mix or derived_targets[:3]),
                     ],
+                    "execution": "internal_surface_recon",
+                    "targets": api_mix or derived_targets[:3],
                     "follow_ups": [
                         {
                             "label": "Signal detection refresh",
-                            "argv": ["signals-run", "{run_dir}"],
+                            "kind": "signals",
                         },
                         {
                             "label": "Policy-safe deep hunt refresh",
-                            "argv": ["deep-hunt", "{run_dir}"],
+                            "kind": "deep_hunt",
                         },
                     ],
                 }
             )
         if len(derived_targets) >= 4:
-            alternate_targets = [derived_targets[0], *derived_targets[3:5]]
+            alternate_targets = self._select_target_mix(
+                derived_targets,
+                preferred_keywords=["login", "auth", "session", "mcp"],
+            )
+            if not alternate_targets:
+                alternate_targets = [derived_targets[0], *derived_targets[3:5]]
             alternate_targets = list(dict.fromkeys(alternate_targets))
             if len(alternate_targets) >= 2:
                 plans.append(
                     {
                         "flow_name": "surface-recon",
-                        "label": "Authorized alternate surface recon",
+                        "label": "Authorized session-boundary passive recon",
                         "argv": [
                             "surface-recon",
                             "--profile",
                             scope.config.profile_name,
                             *alternate_targets[:3],
                         ],
+                        "execution": "internal_surface_recon",
+                        "targets": alternate_targets[:3],
                         "follow_ups": [
                             {
                                 "label": "Signal detection refresh",
-                                "argv": ["signals-run", "{run_dir}"],
+                                "kind": "signals",
                             },
                             {
                                 "label": "Policy-safe deep hunt refresh",
-                                "argv": ["deep-hunt", "{run_dir}"],
+                                "kind": "deep_hunt",
+                            },
+                        ],
+                    }
+                )
+
+        if len(derived_targets) >= 3:
+            docs_targets = self._select_target_mix(
+                derived_targets,
+                preferred_keywords=["developers", "swagger", "openapi", "graphql", "manifest", "config"],
+            )
+            if len(docs_targets) >= 2:
+                plans.append(
+                    {
+                        "flow_name": "surface-recon",
+                        "label": "Authorized developer-surface passive recon",
+                        "argv": [
+                            "surface-recon",
+                            "--profile",
+                            scope.config.profile_name,
+                            *docs_targets[:3],
+                        ],
+                        "execution": "internal_surface_recon",
+                        "targets": docs_targets[:3],
+                        "follow_ups": [
+                            {
+                                "label": "Signal detection refresh",
+                                "kind": "signals",
+                            },
+                            {
+                                "label": "Policy-safe deep hunt refresh",
+                                "kind": "deep_hunt",
                             },
                         ],
                     }
@@ -673,6 +760,56 @@ class AutonomousAgent:
         if process.returncode != 0:
             raise RuntimeError(f"`{label}` failed with exit code {process.returncode}.")
 
+    def execute_plan(self, plan: dict[str, Any]) -> None:
+        if plan.get("execution") == "internal_surface_recon":
+            targets = [str(item) for item in plan.get("targets", []) if str(item).strip()]
+            if self._run_internal_surface_recon(plan, targets):
+                return
+        self.run_cli_command(plan["argv"], label=plan["label"])
+
+    def execute_follow_up(self, follow_up: dict[str, Any], run_dir: Path) -> None:
+        kind = str(follow_up.get("kind", "")).strip()
+        if kind == "signals":
+            if run_signals_internal(run_dir) == 0:
+                return
+            raise RuntimeError(f"`{follow_up['label']}` failed.")
+        if kind == "deep_hunt":
+            if run_deep_hunt_internal(run_dir) == 0:
+                return
+            raise RuntimeError(f"`{follow_up['label']}` failed.")
+        if kind == "report_refresh":
+            if run_report_refresh_internal(run_dir) == 0:
+                return
+            raise RuntimeError(f"`{follow_up['label']}` failed.")
+
+        follow_up_argv = [item.format(run_dir=str(run_dir)) for item in follow_up["argv"]]
+        self.run_cli_command(follow_up_argv, label=follow_up["label"])
+
+    def _run_internal_surface_recon(self, plan: dict[str, Any], targets: list[str]) -> bool:
+        profile_name = self._extract_profile_name(plan.get("argv", []))
+        if not profile_name or len(targets) < 2:
+            return False
+        try:
+            result = run_surface_recon_internal(
+                profile_name=profile_name,
+                targets=targets,
+                with_browser=False,
+                manual_approval=False,
+                max_endpoints=25,
+                max_passive_surfaces=8,
+                max_start_now=10,
+                max_manual_review=20,
+                max_review_later=20,
+                max_recon_backlog=20,
+                max_noise=20,
+            )
+            if result != 0:
+                raise RuntimeError(f"internal surface recon returned {result}")
+            return True
+        except Exception as error:
+            print_status("warn", f"Internal workflow fallback triggered for `{plan['label']}`: {error}")
+            return False
+
     def _prepare_profile(self, scope: ScopeManager, candidate: ProfileCandidate) -> None:
         if not candidate.authorization_confirmed:
             raise RuntimeError(
@@ -816,6 +953,35 @@ class AutonomousAgent:
         )
         return [selected, *remaining] if selected in deduped else remaining
 
+    def _select_target_mix(
+        self,
+        candidates: list[str],
+        preferred_keywords: list[str],
+    ) -> list[str]:
+        selected: list[str] = []
+        lowered_keywords = [item.lower() for item in preferred_keywords]
+
+        for candidate in candidates:
+            lowered = candidate.lower()
+            if any(keyword in lowered for keyword in lowered_keywords):
+                selected.append(candidate)
+            if len(selected) >= 3:
+                break
+
+        if candidates:
+            anchor = candidates[0]
+            if anchor not in selected:
+                selected.insert(0, anchor)
+
+        for candidate in candidates:
+            if candidate in selected:
+                continue
+            selected.append(candidate)
+            if len(selected) >= 3:
+                break
+
+        return selected[:3]
+
     def _target_priority(self, url: str) -> int:
         parsed = urlparse(url)
         host = (parsed.hostname or "").lower()
@@ -838,9 +1004,17 @@ class AutonomousAgent:
             score += 5
         if any(token in path for token in ["/session", "/auth", "/login"]):
             score += 4
+        if "/mcp" in path:
+            score += 4
         if any(token in path for token in ["/internal", "/admin", "/manage"]):
             score += 4
         return score
+
+    def _extract_profile_name(self, argv: list[str]) -> str | None:
+        for index, item in enumerate(argv):
+            if item == "--profile" and index + 1 < len(argv):
+                return str(argv[index + 1]).strip()
+        return None
 
     def _join_url(self, base_url: str, path: str) -> str:
         normalized_base = base_url.rstrip("/") + "/"
@@ -869,3 +1043,16 @@ class AutonomousAgent:
         except json.JSONDecodeError:
             return {}
         return data if isinstance(data, dict) else {}
+
+    def _read_request_budget_used(self, run_dir: Path) -> int:
+        path = run_dir / "parsed" / "request_budget.json"
+        if not path.exists():
+            return 0
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            return 0
+        try:
+            return int(data.get("total_requests", 0))
+        except (TypeError, ValueError):
+            return 0

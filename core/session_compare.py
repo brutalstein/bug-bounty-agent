@@ -16,6 +16,28 @@ from core.scope import ScopeManager
 
 
 @dataclass
+class SessionMethodObservation:
+    label: str
+    method: str
+    auth_mode: str
+    status_code: int | None
+    accessible: bool
+    content_type: str | None
+    response_bytes: int
+    allow_header: str
+    cache_control: str
+    vary: str
+    cors_origin: str
+    cors_credentials: str
+    etag: str
+    auth_cookie_count: int
+    cross_host_redirect_count: int
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+@dataclass
 class SessionCompareItem:
     compare_id: str
     url: str
@@ -47,7 +69,16 @@ class SessionCompareItem:
     set_cookie_changed: bool
     auth_cookie_changed: bool
     cross_host_redirect_changed: bool
+    representation_changed: bool
+    method_exposure_changed: bool
+    cors_policy_changed: bool
+    cache_validator_reused: bool
+    auth_vary_missing: bool
     response_size_delta: int
+    write_methods_exposed: list[str]
+    variant_signal_score: int
+    variant_findings: list[str]
+    method_observations: list[dict]
     sensitive_indicators_added: list[str]
     review_signal: str
     unauth_sample: str
@@ -68,6 +99,9 @@ class SessionCompareSummary:
     changed_count: int
     accessible_after_auth_count: int
     newly_sensitive_count: int
+    high_signal_count: int
+    deep_variant_count: int
+    method_observation_count: int
     strategy_notes: list[str]
     results_json_path: str
     report_markdown_path: str
@@ -97,6 +131,7 @@ class SessionCompareRunner:
         session: AuthenticatedSession,
         max_endpoints: int = 20,
         include_only_interesting: bool = True,
+        full_variant_limit: int = 4,
     ) -> SessionCompareSummary:
         endpoint_validation = self._read_json(self.parsed_dir / "endpoint_validation.json")
         candidates = self._select_candidates(
@@ -109,10 +144,17 @@ class SessionCompareRunner:
         items: list[SessionCompareItem] = []
 
         for index, candidate in enumerate(candidates, start=1):
+            category = str(candidate.get("category") or self.validator._classify_endpoint(str(candidate.get("url", ""))))
             item = self._compare_single(
                 compare_id=f"SC-{index:03d}",
                 candidate=candidate,
                 session=session,
+                deep_variant=(index <= max(full_variant_limit, 0)) or category in {
+                    "authentication_surface",
+                    "api_surface",
+                    "admin_or_privileged_area",
+                    "user_data_surface",
+                },
             )
             items.append(item)
 
@@ -135,11 +177,18 @@ class SessionCompareRunner:
                         item.set_cookie_changed,
                         item.auth_cookie_changed,
                         item.cross_host_redirect_changed,
+                        item.representation_changed,
+                        item.method_exposure_changed,
+                        item.cors_policy_changed,
+                        item.cache_validator_reused,
                     ]
                 )
             ),
             accessible_after_auth_count=sum(1 for item in items if not item.unauth_accessible and item.auth_accessible),
             newly_sensitive_count=sum(1 for item in items if item.sensitive_indicators_added),
+            high_signal_count=sum(1 for item in items if item.variant_signal_score >= 5),
+            deep_variant_count=sum(1 for item in items if len(item.method_observations) > 4),
+            method_observation_count=sum(len(item.method_observations) for item in items),
             strategy_notes=self._strategy_notes(items, session),
             results_json_path=str(self.output_json_path),
             report_markdown_path=str(self.output_markdown_path),
@@ -416,6 +465,7 @@ class SessionCompareRunner:
         compare_id: str,
         candidate: dict,
         session: AuthenticatedSession,
+        deep_variant: bool = False,
     ) -> SessionCompareItem:
         url = str(candidate.get("url", ""))
         source = str(candidate.get("source", "unknown"))
@@ -425,6 +475,16 @@ class SessionCompareRunner:
         auth = self.client.get(url, headers=session.headers)
         unauth_signals = self.signal_analyzer.summarize(unauth)
         auth_signals = self.signal_analyzer.summarize(auth)
+        method_observations = self._collect_method_observations(
+            url=url,
+            category=category,
+            session=session,
+            unauth_get=unauth,
+            auth_get=auth,
+            unauth_signals=unauth_signals,
+            auth_signals=auth_signals,
+            deep_variant=deep_variant,
+        )
 
         unauth_sample_raw = self.validator._sample_body(unauth.body or "")
         auth_sample_raw = self.validator._sample_body(auth.body or "")
@@ -466,6 +526,57 @@ class SessionCompareRunner:
         cross_host_redirect_changed = (
             unauth_signals.cross_host_redirect_count != auth_signals.cross_host_redirect_count
         )
+        unauth_cors_origin = self._normalize_header_value(unauth.headers.get("access-control-allow-origin", ""))
+        auth_cors_origin = self._normalize_header_value(auth.headers.get("access-control-allow-origin", ""))
+        unauth_cors_credentials = self._normalize_header_value(unauth.headers.get("access-control-allow-credentials", ""))
+        auth_cors_credentials = self._normalize_header_value(auth.headers.get("access-control-allow-credentials", ""))
+        cors_policy_changed = (
+            unauth_cors_origin != auth_cors_origin
+            or unauth_cors_credentials != auth_cors_credentials
+        )
+        unauth_etag = self._normalize_header_value(unauth.headers.get("etag", ""))
+        auth_etag = self._normalize_header_value(auth.headers.get("etag", ""))
+        cache_validator_reused = bool(
+            unauth_etag
+            and auth_etag
+            and unauth_etag == auth_etag
+            and (
+                status_changed
+                or response_size_delta != 0
+                or bool(sensitive_added)
+            )
+        )
+        auth_vary_missing = bool(
+            auth_accessible
+            and (auth_signals.auth_cookie_count > 0 or bool(session.headers))
+            and not self._varies_on_session_state(auth_vary)
+        )
+        write_methods_exposed = self._collect_write_methods(method_observations)
+        representation_changed = self._representation_changed(method_observations)
+        method_exposure_changed = self._method_exposure_changed(method_observations)
+        variant_findings = self._build_variant_findings(
+            category=category,
+            status_changed=status_changed,
+            sensitive_added=sensitive_added,
+            cache_policy_changed=cache_policy_changed,
+            vary_changed=vary_changed,
+            cors_policy_changed=cors_policy_changed,
+            cache_validator_reused=cache_validator_reused,
+            auth_vary_missing=auth_vary_missing,
+            method_exposure_changed=method_exposure_changed,
+            representation_changed=representation_changed,
+            write_methods_exposed=write_methods_exposed,
+            method_observations=method_observations,
+        )
+        variant_signal_score = self._variant_signal_score(
+            sensitive_added=sensitive_added,
+            cache_validator_reused=cache_validator_reused,
+            auth_vary_missing=auth_vary_missing,
+            method_exposure_changed=method_exposure_changed,
+            representation_changed=representation_changed,
+            cors_policy_changed=cors_policy_changed,
+            write_methods_exposed=write_methods_exposed,
+        )
 
         notes: list[str] = []
         if status_changed:
@@ -484,10 +595,25 @@ class SessionCompareRunner:
             notes.append("auth_cookie_changed")
         if cross_host_redirect_changed:
             notes.append("cross_host_redirect_changed")
+        if representation_changed:
+            notes.append("representation_changed")
+        if method_exposure_changed:
+            notes.append("method_exposure_changed")
+        if cors_policy_changed:
+            notes.append("cors_policy_changed")
+        if cache_validator_reused:
+            notes.append("cache_validator_reused")
+        if auth_vary_missing:
+            notes.append("auth_vary_missing")
         if sensitive_added:
             notes.append("new_sensitive_indicators_after_auth")
         if response_size_delta != 0:
             notes.append("response_size_changed")
+        notes.extend(
+            finding
+            for finding in variant_findings
+            if finding not in notes
+        )
 
         review_signal = self._build_review_signal(
             unauth_status=unauth.status_code,
@@ -504,6 +630,13 @@ class SessionCompareRunner:
             vary_changed=vary_changed,
             set_cookie_changed=set_cookie_changed,
             cross_host_redirect_changed=cross_host_redirect_changed,
+            cors_policy_changed=cors_policy_changed,
+            cache_validator_reused=cache_validator_reused,
+            auth_vary_missing=auth_vary_missing,
+            representation_changed=representation_changed,
+            method_exposure_changed=method_exposure_changed,
+            write_methods_exposed=write_methods_exposed,
+            variant_signal_score=variant_signal_score,
             sensitive_added=sensitive_added,
         )
 
@@ -538,7 +671,16 @@ class SessionCompareRunner:
             set_cookie_changed=set_cookie_changed,
             auth_cookie_changed=auth_cookie_changed,
             cross_host_redirect_changed=cross_host_redirect_changed,
+            representation_changed=representation_changed,
+            method_exposure_changed=method_exposure_changed,
+            cors_policy_changed=cors_policy_changed,
+            cache_validator_reused=cache_validator_reused,
+            auth_vary_missing=auth_vary_missing,
             response_size_delta=response_size_delta,
+            write_methods_exposed=write_methods_exposed,
+            variant_signal_score=variant_signal_score,
+            variant_findings=variant_findings,
+            method_observations=[item.to_dict() for item in method_observations],
             sensitive_indicators_added=sensitive_added,
             review_signal=review_signal,
             unauth_sample=self.redactor.redact_text(unauth_sample_raw),
@@ -562,8 +704,50 @@ class SessionCompareRunner:
         vary_changed: bool,
         set_cookie_changed: bool,
         cross_host_redirect_changed: bool,
+        cors_policy_changed: bool,
+        cache_validator_reused: bool,
+        auth_vary_missing: bool,
+        representation_changed: bool,
+        method_exposure_changed: bool,
+        write_methods_exposed: list[str],
+        variant_signal_score: int,
         sensitive_added: list[str],
     ) -> str:
+        if sensitive_added and (cache_validator_reused or auth_vary_missing):
+            return (
+                "Authenticated response added sensitive-looking data while cache-boundary hints stayed weak. "
+                "Review whether response segregation across anonymous and authenticated contexts is strong enough."
+            )
+
+        if cache_validator_reused:
+            return (
+                "Anonymous and authenticated variants reused the same cache validator despite a material response difference. "
+                "Review cache-key separation and whether shared intermediaries could confuse variants."
+            )
+
+        if auth_vary_missing and (cache_policy_changed or vary_changed):
+            return (
+                "Authenticated response changed materially, but Vary still does not clearly advertise Authorization or Cookie. "
+                "Review cache segregation and downstream confidentiality assumptions."
+            )
+
+        if method_exposure_changed and write_methods_exposed:
+            return (
+                "Read-only method profiling showed a different advertised method surface across the auth boundary, "
+                f"including write-capable methods `{write_methods_exposed}`. Keep the review passive, but treat this as a strong route-priority signal."
+            )
+
+        if representation_changed and variant_signal_score >= 4:
+            return (
+                "The same endpoint rendered materially different representations across read-only variants. "
+                "Review whether this is expected role-aware behavior or a weaker form of boundary drift."
+            )
+
+        if cors_policy_changed:
+            return (
+                "CORS policy changed across the authentication boundary. Review whether authenticated responses stay tightly origin-scoped."
+            )
+
         if not unauth_accessible and auth_accessible:
             return (
                 "Reachable only after authenticated context. Review whether this is expected for the test account "
@@ -618,6 +802,271 @@ class SessionCompareRunner:
         lowered = (vary_value or "").lower()
         return "cookie" in lowered or "authorization" in lowered
 
+    def _collect_method_observations(
+        self,
+        *,
+        url: str,
+        category: str,
+        session: AuthenticatedSession,
+        unauth_get,
+        auth_get,
+        unauth_signals,
+        auth_signals,
+        deep_variant: bool,
+    ) -> list[SessionMethodObservation]:
+        observations = [
+            self._observation_from_response(
+                label="default_get",
+                method="GET",
+                auth_mode="unauth",
+                response=unauth_get,
+                signal_summary=unauth_signals,
+            ),
+            self._observation_from_response(
+                label="default_get",
+                method="GET",
+                auth_mode="auth",
+                response=auth_get,
+                signal_summary=auth_signals,
+            ),
+        ]
+
+        if self.scope.is_method_allowed("HEAD"):
+            unauth_head = self.client.request(url=url, method="HEAD")
+            auth_head = self.client.request(url=url, method="HEAD", headers=session.headers)
+            observations.extend(
+                [
+                    self._observation_from_response(
+                        label="head_probe",
+                        method="HEAD",
+                        auth_mode="unauth",
+                        response=unauth_head,
+                        signal_summary=self.signal_analyzer.summarize(unauth_head),
+                    ),
+                    self._observation_from_response(
+                        label="head_probe",
+                        method="HEAD",
+                        auth_mode="auth",
+                        response=auth_head,
+                        signal_summary=self.signal_analyzer.summarize(auth_head),
+                    ),
+                ]
+            )
+
+        if deep_variant and self.scope.is_method_allowed("OPTIONS") and self._should_probe_options(url, category):
+            unauth_options = self.client.request(url=url, method="OPTIONS")
+            auth_options = self.client.request(url=url, method="OPTIONS", headers=session.headers)
+            observations.extend(
+                [
+                    self._observation_from_response(
+                        label="options_probe",
+                        method="OPTIONS",
+                        auth_mode="unauth",
+                        response=unauth_options,
+                        signal_summary=self.signal_analyzer.summarize(unauth_options),
+                    ),
+                    self._observation_from_response(
+                        label="options_probe",
+                        method="OPTIONS",
+                        auth_mode="auth",
+                        response=auth_options,
+                        signal_summary=self.signal_analyzer.summarize(auth_options),
+                    ),
+                ]
+            )
+
+        if deep_variant and self._should_probe_json_variant(url, category):
+            json_headers = {"Accept": "application/json"}
+            auth_json_headers = {"Accept": "application/json", **session.headers}
+            unauth_json = self.client.request(url=url, method="GET", headers=json_headers, accept="application/json")
+            auth_json = self.client.request(url=url, method="GET", headers=auth_json_headers, accept="application/json")
+            observations.extend(
+                [
+                    self._observation_from_response(
+                        label="json_accept_get",
+                        method="GET",
+                        auth_mode="unauth",
+                        response=unauth_json,
+                        signal_summary=self.signal_analyzer.summarize(unauth_json),
+                    ),
+                    self._observation_from_response(
+                        label="json_accept_get",
+                        method="GET",
+                        auth_mode="auth",
+                        response=auth_json,
+                        signal_summary=self.signal_analyzer.summarize(auth_json),
+                    ),
+                ]
+            )
+
+        return observations
+
+    def _observation_from_response(
+        self,
+        *,
+        label: str,
+        method: str,
+        auth_mode: str,
+        response,
+        signal_summary,
+    ) -> SessionMethodObservation:
+        accessible = response.status_code is not None and 200 <= int(response.status_code) < 400
+        return SessionMethodObservation(
+            label=label,
+            method=method,
+            auth_mode=auth_mode,
+            status_code=response.status_code,
+            accessible=accessible,
+            content_type=response.content_type,
+            response_bytes=len(response.body or ""),
+            allow_header=self._normalize_header_value(response.headers.get("allow", "")),
+            cache_control=self._normalize_header_value(signal_summary.security_headers.get("cache-control", "")),
+            vary=self._normalize_header_value(response.headers.get("vary", "")),
+            cors_origin=self._normalize_header_value(response.headers.get("access-control-allow-origin", "")),
+            cors_credentials=self._normalize_header_value(response.headers.get("access-control-allow-credentials", "")),
+            etag=self._normalize_header_value(response.headers.get("etag", "")),
+            auth_cookie_count=int(signal_summary.auth_cookie_count),
+            cross_host_redirect_count=int(signal_summary.cross_host_redirect_count),
+        )
+
+    def _should_probe_options(self, url: str, category: str) -> bool:
+        lowered = url.lower()
+        return category in {
+            "authentication_surface",
+            "api_surface",
+            "admin_or_privileged_area",
+            "user_data_surface",
+        } or any(marker in lowered for marker in ("/api/", "/graphql", "/auth", "/session", "/meta", "/base"))
+
+    def _should_probe_json_variant(self, url: str, category: str) -> bool:
+        lowered = url.lower()
+        return category in {
+            "authentication_surface",
+            "api_surface",
+            "admin_or_privileged_area",
+            "user_data_surface",
+            "input_surface",
+        } or any(marker in lowered for marker in ("/api/", "/graphql", "/json", "/auth", "/session", "/meta"))
+
+    def _parse_allow_methods(self, value: str) -> list[str]:
+        methods: list[str] = []
+        for item in str(value or "").split(","):
+            normalized = item.strip().upper()
+            if normalized and normalized not in methods:
+                methods.append(normalized)
+        return methods
+
+    def _collect_write_methods(self, observations: list[SessionMethodObservation]) -> list[str]:
+        write_methods: list[str] = []
+        for item in observations:
+            for method in self._parse_allow_methods(item.allow_header):
+                if method in {"POST", "PUT", "PATCH", "DELETE"} and method not in write_methods:
+                    write_methods.append(method)
+        return sorted(write_methods)
+
+    def _representation_changed(self, observations: list[SessionMethodObservation]) -> bool:
+        grouped: dict[tuple[str, str], SessionMethodObservation] = {}
+        for item in observations:
+            grouped[(item.label, item.auth_mode)] = item
+
+        for label in {"default_get", "json_accept_get", "head_probe", "options_probe"}:
+            unauth = grouped.get((label, "unauth"))
+            auth = grouped.get((label, "auth"))
+            if unauth is None or auth is None:
+                continue
+            if unauth.status_code != auth.status_code:
+                return True
+            if self._normalize_header_value(unauth.content_type or "") != self._normalize_header_value(auth.content_type or ""):
+                return True
+            if abs(int(auth.response_bytes) - int(unauth.response_bytes)) >= 64:
+                return True
+        return False
+
+    def _method_exposure_changed(self, observations: list[SessionMethodObservation]) -> bool:
+        grouped: dict[tuple[str, str], SessionMethodObservation] = {}
+        for item in observations:
+            grouped[(item.label, item.auth_mode)] = item
+
+        for label in {"head_probe", "options_probe"}:
+            unauth = grouped.get((label, "unauth"))
+            auth = grouped.get((label, "auth"))
+            if unauth is None or auth is None:
+                continue
+            if unauth.status_code != auth.status_code:
+                return True
+            if self._parse_allow_methods(unauth.allow_header) != self._parse_allow_methods(auth.allow_header):
+                return True
+        return False
+
+    def _build_variant_findings(
+        self,
+        *,
+        category: str,
+        status_changed: bool,
+        sensitive_added: list[str],
+        cache_policy_changed: bool,
+        vary_changed: bool,
+        cors_policy_changed: bool,
+        cache_validator_reused: bool,
+        auth_vary_missing: bool,
+        method_exposure_changed: bool,
+        representation_changed: bool,
+        write_methods_exposed: list[str],
+        method_observations: list[SessionMethodObservation],
+    ) -> list[str]:
+        findings: list[str] = []
+
+        if cache_validator_reused:
+            findings.append("same_cache_validator_across_auth_boundary")
+        if auth_vary_missing:
+            findings.append("authenticated_response_missing_session_vary")
+        if sensitive_added and (cache_policy_changed or vary_changed or cache_validator_reused):
+            findings.append("sensitive_response_with_weak_cache_segregation")
+        if method_exposure_changed:
+            findings.append("method_surface_changed_across_auth_boundary")
+        if write_methods_exposed and self._should_probe_options("", category):
+            findings.append("write_methods_advertised_on_sensitive_surface")
+        if representation_changed:
+            findings.append("representation_drift_across_readonly_variants")
+        if cors_policy_changed:
+            findings.append("cors_policy_changed_across_auth_boundary")
+        if status_changed and any(item.method == "HEAD" and item.status_code in {200, 204} for item in method_observations):
+            findings.append("head_get_boundary_mismatch")
+
+        deduped: list[str] = []
+        for item in findings:
+            if item not in deduped:
+                deduped.append(item)
+        return deduped
+
+    def _variant_signal_score(
+        self,
+        *,
+        sensitive_added: list[str],
+        cache_validator_reused: bool,
+        auth_vary_missing: bool,
+        method_exposure_changed: bool,
+        representation_changed: bool,
+        cors_policy_changed: bool,
+        write_methods_exposed: list[str],
+    ) -> int:
+        score = 0
+        if sensitive_added:
+            score += 3
+        if cache_validator_reused:
+            score += 3
+        if auth_vary_missing:
+            score += 2
+        if method_exposure_changed:
+            score += 2
+        if representation_changed:
+            score += 1
+        if cors_policy_changed:
+            score += 1
+        if write_methods_exposed:
+            score += 1
+        return score
+
     def _build_markdown(self, summary: SessionCompareSummary) -> str:
         lines: list[str] = []
 
@@ -635,6 +1084,9 @@ class SessionCompareRunner:
         lines.append(f"- **Changed Endpoints:** `{summary.changed_count}`")
         lines.append(f"- **Accessible After Auth:** `{summary.accessible_after_auth_count}`")
         lines.append(f"- **New Sensitive Indicators After Auth:** `{summary.newly_sensitive_count}`")
+        lines.append(f"- **High-Signal Variant Diffs:** `{summary.high_signal_count}`")
+        lines.append(f"- **Deep Variant Targets:** `{summary.deep_variant_count}`")
+        lines.append(f"- **Method Observations:** `{summary.method_observation_count}`")
         lines.append("")
         if summary.strategy_notes:
             lines.append("## Strategy Notes")
@@ -667,9 +1119,39 @@ class SessionCompareRunner:
             lines.append(f"- **Auth Auth-Like Cookies:** `{item.get('auth_auth_cookie_count')}`")
             lines.append(f"- **Cache Policy Changed:** `{item.get('cache_policy_changed')}`")
             lines.append(f"- **Vary Changed:** `{item.get('vary_changed')}`")
+            lines.append(f"- **Representation Changed:** `{item.get('representation_changed')}`")
+            lines.append(f"- **Method Exposure Changed:** `{item.get('method_exposure_changed')}`")
+            lines.append(f"- **CORS Policy Changed:** `{item.get('cors_policy_changed')}`")
+            lines.append(f"- **Cache Validator Reused:** `{item.get('cache_validator_reused')}`")
+            lines.append(f"- **Auth Vary Missing:** `{item.get('auth_vary_missing')}`")
+            lines.append(f"- **Write Methods Exposed:** `{item.get('write_methods_exposed')}`")
+            lines.append(f"- **Variant Signal Score:** `{item.get('variant_signal_score')}`")
             lines.append(f"- **Response Size Delta:** `{item.get('response_size_delta')}`")
             lines.append(f"- **Sensitive Added:** `{item.get('sensitive_indicators_added')}`")
             lines.append("")
+            findings = item.get("variant_findings", [])
+            if findings:
+                lines.append("**Variant Findings**")
+                lines.append("")
+                for finding in findings:
+                    lines.append(f"- `{finding}`")
+                lines.append("")
+            observations = item.get("method_observations", [])
+            if observations:
+                lines.append("**Method Observations**")
+                lines.append("")
+                for observation in observations:
+                    lines.append(
+                        "- "
+                        f"`{observation.get('auth_mode')}` "
+                        f"`{observation.get('method')}` "
+                        f"`{observation.get('label')}` "
+                        f"status=`{observation.get('status_code')}` "
+                        f"allow=`{observation.get('allow_header') or '(none)'}` "
+                        f"vary=`{observation.get('vary') or '(none)'}` "
+                        f"etag=`{observation.get('etag') or '(none)'}`"
+                    )
+                lines.append("")
             lines.append("**Review Signal**")
             lines.append("")
             lines.append(str(item.get("review_signal", "")))
@@ -732,6 +1214,14 @@ class SessionCompareRunner:
                     "Next real-program step: seed more API-specific or token-aware routes under in-scope hosts such as "
                     "`api-staging.airtable.com`, then repeat the same read-only comparison."
                 )
+        if any(item.variant_signal_score >= 5 for item in items):
+            notes.append(
+                "At least one endpoint produced a strong multi-variant read-only diff. Prioritize those entries before broadening surface count."
+            )
+        if any(item.write_methods_exposed for item in items):
+            notes.append(
+                "OPTIONS profiling exposed write-capable methods on some high-value surfaces. Keep those routes high in the queue even though this workflow remains strictly read-only."
+            )
 
         return notes
 

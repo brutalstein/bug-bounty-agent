@@ -11,10 +11,16 @@ import json
 import time
 
 from core.http_client import SafeHttpClient
-from core.llm_client import analyze_signal, current_llm_backend, generate_report_section
+from core.llm_client import (
+    analyze_signal,
+    configure_trace_file,
+    current_llm_backend,
+    generate_report_section,
+)
 from core.redactor import EvidenceRedactor
 from core.run_context import RunContext
 from core.scope import ScopeManager
+from core.strategy_memory import StrategyMemory
 
 
 MAX_SIGNALS_PER_RUN = 10
@@ -22,16 +28,42 @@ MAX_ITERATIONS_PER_SIGNAL = 8
 MAX_TOTAL_REQUESTS_PER_RUN = 500
 SIGNAL_TIMEOUT_SECONDS = 120
 METHODS_BY_SIGNAL_TYPE = {
-    "IDOR": ["context_from_ranked_candidates", "js_context_review", "safe_reprobe_get"],
-    "AUTH_BYPASS": ["context_from_ranked_candidates", "safe_reprobe_get", "header_policy_review"],
-    "SENSITIVE_DATA": ["safe_reprobe_get", "response_shape_review", "context_from_ranked_candidates"],
-    "ADMIN_EXPOSURE": ["safe_reprobe_get", "context_from_ranked_candidates", "header_policy_review"],
-    "JWT_ISSUES": ["js_context_review", "context_from_ranked_candidates"],
-    "SSRF_CANDIDATE": ["js_context_review", "redirect_behavior_review"],
-    "CORS_MISCONFIG": ["header_policy_review", "safe_reprobe_get"],
-    "INFO_DISCLOSURE": ["safe_reprobe_get", "response_shape_review"],
-    "OPEN_REDIRECT": ["redirect_behavior_review", "js_context_review"],
-    "BROKEN_ACCESS_CONTROL": ["context_from_ranked_candidates", "safe_reprobe_get"],
+    "IDOR": [
+        "route_family_neighbor_review",
+        "context_from_ranked_candidates",
+        "js_context_review",
+        "cross_surface_context_review",
+        "safe_reprobe_get",
+    ],
+    "AUTH_BYPASS": [
+        "cross_surface_context_review",
+        "context_from_ranked_candidates",
+        "safe_reprobe_get",
+        "header_policy_review",
+    ],
+    "SENSITIVE_DATA": [
+        "response_shape_review",
+        "route_family_neighbor_review",
+        "safe_reprobe_get",
+        "context_from_ranked_candidates",
+    ],
+    "ADMIN_EXPOSURE": [
+        "context_from_ranked_candidates",
+        "cross_surface_context_review",
+        "safe_reprobe_get",
+        "header_policy_review",
+    ],
+    "JWT_ISSUES": ["js_context_review", "cross_surface_context_review", "context_from_ranked_candidates"],
+    "SSRF_CANDIDATE": ["js_context_review", "route_family_neighbor_review", "redirect_behavior_review"],
+    "CORS_MISCONFIG": ["header_policy_review", "cross_surface_context_review", "safe_reprobe_get"],
+    "INFO_DISCLOSURE": ["response_shape_review", "route_family_neighbor_review", "safe_reprobe_get"],
+    "OPEN_REDIRECT": ["redirect_behavior_review", "js_context_review", "cross_surface_context_review"],
+    "BROKEN_ACCESS_CONTROL": [
+        "cross_surface_context_review",
+        "route_family_neighbor_review",
+        "context_from_ranked_candidates",
+        "safe_reprobe_get",
+    ],
 }
 
 
@@ -70,6 +102,8 @@ class DeepHunter:
         self.output_json_path = self.parsed_dir / "deep_hunt.json"
         self.output_markdown_path = self.reports_dir / "deep_hunt.md"
         self.llm_usage_json_path = self.parsed_dir / "llm_usage.json"
+        self.strategy_memory_path = self.parsed_dir / "deep_hunt_strategy.json"
+        configure_trace_file(self.parsed_dir / "llm_traces.jsonl")
         self.total_request_count = 0
         self.endpoint_validation = self._read_json(self.parsed_dir / "endpoint_validation.json")
         self.js_analysis = self._read_json(self.parsed_dir / "js_analysis.json")
@@ -82,6 +116,9 @@ class DeepHunter:
         self.llm_signal_counts: dict[str, int] = {}
         self.llm_stage_hashes: dict[str, dict[str, str]] = {}
         self.llm_usage_events: list[dict] = []
+        self.strategy_memory = StrategyMemory(self.strategy_memory_path)
+        self.passive_surface_diff = self._read_json(self.parsed_dir / "passive_surface_diff.json")
+        self.session_surface_compare = self._read_json(self.parsed_dir / "session_surface_compare.json")
 
     def run(
         self,
@@ -153,6 +190,7 @@ class DeepHunter:
             self._build_markdown(summary),
             encoding="utf-8",
         )
+        self.strategy_memory.save()
         self.ctx.add_event(
             event_type="deep_hunt_completed",
             message="Policy-safe deep hunt completed.",
@@ -175,6 +213,7 @@ class DeepHunter:
         started_at = time.monotonic()
 
         while self._should_continue_signal(signal, iteration_count, started_at):
+            signal_key = self._signal_key(signal)
             available_methods = [
                 item
                 for item in self._methods_for_signal(signal)
@@ -199,9 +238,19 @@ class DeepHunter:
                 )
                 break
 
+            confidence_before = float(signal.get("confidence", 0.0))
+            findings_before = len(signal.get("findings", []))
             signal = handler(signal)
             iteration_count += 1
             signal["methods_tried"].append(method_name)
+            self.strategy_memory.record_method_result(
+                signal_key=signal_key,
+                endpoint_family=self._endpoint_family(str(signal.get("endpoint", ""))),
+                method=method_name,
+                confidence_before=confidence_before,
+                confidence_after=float(signal.get("confidence", 0.0)),
+                findings_delta=max(len(signal.get("findings", [])) - findings_before, 0),
+            )
             self._post_method_llm_review(signal, available_methods)
 
         if signal.get("status") == "investigating":
@@ -245,7 +294,14 @@ class DeepHunter:
         return True
 
     def _methods_for_signal(self, signal: dict) -> list[str]:
-        return METHODS_BY_SIGNAL_TYPE.get(str(signal.get("signal_type", "")).upper(), ["context_from_ranked_candidates"])
+        signal_type = str(signal.get("signal_type", "")).upper()
+        candidates = METHODS_BY_SIGNAL_TYPE.get(signal_type, ["context_from_ranked_candidates"])
+        return self.strategy_memory.choose_method_order(
+            signal_key=self._signal_key(signal),
+            signal_type=signal_type,
+            endpoint_family=self._endpoint_family(str(signal.get("endpoint", ""))),
+            available_methods=candidates,
+        )
 
     def _select_next_method(self, signal: dict, available_methods: list[str]) -> str:
         if not self._should_use_llm(signal, stage="method_selection"):
@@ -553,6 +609,75 @@ class DeepHunter:
             signal["confidence"] = min(0.95, float(signal.get("confidence", 0.0)) + 0.05)
         return signal
 
+    def _method_route_family_neighbor_review(self, signal: dict) -> dict:
+        endpoint = str(signal.get("endpoint", "")).strip()
+        family = self._endpoint_family(endpoint)
+        if not family:
+            return signal
+
+        sibling_matches: list[str] = []
+        for candidate_url, candidate in self.endpoint_validation_by_url.items():
+            if candidate_url == endpoint:
+                continue
+            if self._endpoint_family(candidate_url) != family:
+                continue
+            if not isinstance(candidate, dict):
+                continue
+            status_code = candidate.get("status_code")
+            if isinstance(status_code, int) and 200 <= status_code < 500:
+                sibling_matches.append(candidate_url)
+            if len(sibling_matches) >= 6:
+                break
+
+        signal["findings"].append(
+            {
+                "kind": "route_family_neighbor_review",
+                "endpoint_family": family,
+                "sibling_matches": sibling_matches,
+            }
+        )
+        if sibling_matches:
+            signal["confidence"] = min(0.95, float(signal.get("confidence", 0.0)) + 0.05)
+        else:
+            signal["confidence"] = max(0.1, float(signal.get("confidence", 0.0)) - 0.015)
+        return signal
+
+    def _method_cross_surface_context_review(self, signal: dict) -> dict:
+        endpoint = str(signal.get("endpoint", "")).strip().lower()
+        supporting_signals: list[str] = []
+
+        for hypothesis in self.passive_surface_diff.get("hypotheses", []):
+            if not isinstance(hypothesis, dict):
+                continue
+            for affected in hypothesis.get("affected_surfaces", []):
+                lowered = str(affected).lower()
+                if lowered in endpoint or endpoint in lowered or self._endpoint_family(lowered) == self._endpoint_family(endpoint):
+                    supporting_signals.append(str(hypothesis.get("category", "")))
+                    break
+
+        for hypothesis in self.session_surface_compare.get("hypotheses", []):
+            if not isinstance(hypothesis, dict):
+                continue
+            title = str(hypothesis.get("title", ""))
+            rationale = str(hypothesis.get("rationale", ""))
+            if any(token in endpoint for token in ["login", "auth", "session", "api", "graphql"]):
+                supporting_signals.append(title or rationale)
+            if len(supporting_signals) >= 6:
+                break
+
+        supporting_signals = [item for item in dict.fromkeys(supporting_signals) if item]
+        signal["findings"].append(
+            {
+                "kind": "cross_surface_context_review",
+                "supporting_signals": supporting_signals[:6],
+            }
+        )
+        if supporting_signals:
+            signal["confidence"] = min(0.95, float(signal.get("confidence", 0.0)) + 0.04)
+        else:
+            signal["confidence"] = max(0.1, float(signal.get("confidence", 0.0)) - 0.01)
+        return signal
+
     def _interesting_headers(self, headers: dict[str, str]) -> dict[str, str]:
         keys = [
             "access-control-allow-origin",
@@ -714,3 +839,25 @@ class DeepHunter:
             for item in items
             if isinstance(item, dict) and str(item.get("target", "")).strip()
         }
+
+    def _endpoint_family(self, endpoint: str) -> str:
+        if not endpoint:
+            return ""
+        try:
+            from urllib.parse import urlparse
+
+            url = urlparse(endpoint)
+            segments = [segment for segment in url.path.split("/") if segment]
+            normalized_segments: list[str] = []
+            for segment in segments:
+                lowered = segment.lower()
+                if lowered.isdigit() or len(lowered) > 12 and all(ch in "0123456789abcdef-" for ch in lowered):
+                    normalized_segments.append(":id")
+                else:
+                    normalized_segments.append(lowered)
+                if len(normalized_segments) >= 2:
+                    break
+            family_path = "/".join(normalized_segments) or "(root)"
+            return f"{url.netloc.lower()}::{family_path}"
+        except Exception:
+            return ""

@@ -17,15 +17,21 @@ from core.scope import ScopeManager
 PROBE_DEFINITIONS = [
     {"path": "/graphql", "kind": "graphql"},
     {"path": "/api/graphql", "kind": "graphql"},
+    {"path": "/.well-known/openid-configuration", "kind": "auth_config"},
+    {"path": "/oauth/.well-known/openid-configuration", "kind": "auth_config"},
     {"path": "/swagger.json", "kind": "api_schema"},
     {"path": "/openapi.json", "kind": "api_schema"},
     {"path": "/swagger/v1/swagger.json", "kind": "api_schema"},
     {"path": "/v1/api-docs", "kind": "api_schema"},
     {"path": "/api-docs", "kind": "api_schema"},
+    {"path": "/api/v0/meta/bases", "kind": "api_metadata"},
+    {"path": "/v0/meta/bases", "kind": "api_metadata"},
     {"path": "/manifest.json", "kind": "client_config"},
     {"path": "/asset-manifest.json", "kind": "client_config"},
     {"path": "/config.json", "kind": "client_config"},
     {"path": "/version.json", "kind": "client_config"},
+    {"path": "/security.txt", "kind": "discovery"},
+    {"path": "/.well-known/security.txt", "kind": "discovery"},
     {"path": "/robots.txt", "kind": "discovery"},
     {"path": "/sitemap.xml", "kind": "discovery"},
 ]
@@ -266,6 +272,10 @@ class HighValueReconRunner:
             candidates.extend(self._extract_textual_routes(origin, body))
         elif probe_kind == "api_schema":
             candidates.extend(self._extract_openapi_routes(origin, body))
+        elif probe_kind == "auth_config":
+            candidates.extend(self._extract_auth_config_routes(origin, body))
+        elif probe_kind == "api_metadata":
+            candidates.extend(self._extract_textual_routes(origin, body))
         elif probe_kind == "client_config" and path.endswith(".json"):
             candidates.extend(self._extract_textual_routes(origin, body))
 
@@ -318,6 +328,30 @@ class HighValueReconRunner:
         else:
             for match in re.findall(r"['\"](/[^'\"\s{}]{2,})['\"]\s*:", body):
                 candidates.append(match)
+
+        return candidates
+
+    def _extract_auth_config_routes(self, origin: str, body: str) -> list[str]:
+        candidates: list[str] = []
+
+        try:
+            data = json.loads(body)
+        except json.JSONDecodeError:
+            data = None
+
+        if isinstance(data, dict):
+            for key in [
+                "issuer",
+                "authorization_endpoint",
+                "token_endpoint",
+                "userinfo_endpoint",
+                "jwks_uri",
+                "revocation_endpoint",
+                "introspection_endpoint",
+            ]:
+                value = data.get(key)
+                if isinstance(value, str) and value.strip():
+                    candidates.append(value.strip())
 
         return candidates
 
@@ -472,6 +506,30 @@ class HighValueReconRunner:
             if "paths" in lowered:
                 signals.append("paths_marker")
 
+        if probe_kind == "auth_config":
+            for marker in (
+                "authorization_endpoint",
+                "token_endpoint",
+                "userinfo_endpoint",
+                "jwks_uri",
+                "issuer",
+                "scopes_supported",
+            ):
+                if marker in lowered:
+                    signals.append(f"auth_config_key={marker}")
+
+        if probe_kind == "api_metadata":
+            for marker in (
+                "\"bases\"",
+                "\"base\"",
+                "\"workspace\"",
+                "\"tables\"",
+                "\"fields\"",
+                "\"metadata\"",
+            ):
+                if marker in lowered:
+                    signals.append(f"api_metadata_marker={marker.strip('\"')}")
+
         if probe_kind == "client_config":
             for marker in (
                 "api",
@@ -531,6 +589,14 @@ class HighValueReconRunner:
                 for signal in matched_signals
             )
 
+        if probe_kind == "auth_config":
+            config_hits = [signal for signal in matched_signals if signal.startswith("auth_config_key=")]
+            return status_code == 200 and len(config_hits) >= 2
+
+        if probe_kind == "api_metadata":
+            metadata_hits = [signal for signal in matched_signals if signal.startswith("api_metadata_marker=")]
+            return status_code == 200 and len(metadata_hits) >= 2
+
         if probe_kind == "client_config":
             config_hits = [signal for signal in matched_signals if signal.startswith("config_key=")]
             return status_code == 200 and len(config_hits) >= 2
@@ -553,6 +619,10 @@ class HighValueReconRunner:
             return "GraphQL surfaces can become high-value if public schema or query behavior reveals more than expected."
         if probe_kind == "api_schema":
             return "Public API schema exposure can accelerate endpoint discovery and uncover sensitive routes or models."
+        if probe_kind == "auth_config":
+            return "Public auth configuration is usually expected, but unexpected endpoint wiring or overly broad auth surface hints can improve downstream boundary review."
+        if probe_kind == "api_metadata":
+            return "Public API metadata can expose tenant, workspace, or model structure that deserves careful access-boundary review."
         if probe_kind == "client_config":
             return "Client config responses can expose environment wiring, third-party integrations, and internal service hints."
         if probe_kind == "discovery":

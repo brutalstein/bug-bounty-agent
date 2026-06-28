@@ -634,19 +634,39 @@ class ValidationPlanner:
             f"cache_policy_changed={item.get('cache_policy_changed')}",
             f"vary_changed={item.get('vary_changed')}",
             f"auth_cookie_delta={int(item.get('auth_auth_cookie_count', 0)) - int(item.get('unauth_auth_cookie_count', 0))}",
+            f"variant_signal_score={item.get('variant_signal_score', 0)}",
         ]
 
         if item.get("sensitive_indicators_added"):
             refs.append(f"sensitive_indicators_added={item.get('sensitive_indicators_added')}")
+        if item.get("variant_findings"):
+            refs.append(f"variant_findings={item.get('variant_findings')}")
+        if item.get("write_methods_exposed"):
+            refs.append(f"write_methods_exposed={item.get('write_methods_exposed')}")
 
         return refs
 
     def _session_compare_category(self, item: dict) -> str:
+        if item.get("sensitive_indicators_added") and (
+            item.get("cache_validator_reused") is True
+            or item.get("auth_vary_missing") is True
+        ):
+            return "authenticated_sensitive_cache_boundary_review"
+
         if item.get("sensitive_indicators_added"):
             return "authenticated_sensitive_response_review"
 
         if item.get("accessibility_changed") is True or item.get("auth_requirement_changed") is True:
             return "authenticated_access_boundary_review"
+
+        if item.get("method_exposure_changed") is True and item.get("write_methods_exposed"):
+            return "authenticated_method_surface_review"
+
+        if item.get("cache_validator_reused") is True or item.get("auth_vary_missing") is True:
+            return "authenticated_cache_key_segregation_review"
+
+        if item.get("representation_changed") is True or item.get("cors_policy_changed") is True:
+            return "authenticated_representation_drift_review"
 
         if item.get("cache_policy_changed") is True and (
             int(item.get("unauth_auth_cookie_count", 0)) > 0

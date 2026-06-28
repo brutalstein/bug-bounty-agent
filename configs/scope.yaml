@@ -52,6 +52,8 @@ profiles:
     policy:
       program_name: "OWASP Juice Shop Local Lab"
       program_url: "https://owasp.org/www-project-juice-shop/"
+      policy_reviewed_at: "2026-06-27"
+      policy_max_age_days: 365
       allowed_http_methods:
         - "GET"
         - "HEAD"
@@ -151,6 +153,8 @@ profiles:
     policy:
       program_name: "Airtable HackerOne Bug Bounty"
       program_url: "https://hackerone.com/airtable"
+      policy_reviewed_at: "2026-06-25"
+      policy_max_age_days: 30
       allowed_http_methods:
         - "GET"
         - "HEAD"

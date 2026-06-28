@@ -56,6 +56,8 @@ def command_doctor(_: argparse.Namespace) -> int:
         PROJECT_ROOT / "core" / "signal_detector.py",
         PROJECT_ROOT / "core" / "deep_hunter.py",
         PROJECT_ROOT / "core" / "llm_client.py",
+        PROJECT_ROOT / "core" / "request_budget.py",
+        PROJECT_ROOT / "core" / "strategy_memory.py",
         PROJECT_ROOT / "tools" / "tool_runner.py",
         PROJECT_ROOT / "tools" / "recon_tools.py",
         PROJECT_ROOT / "tools" / "crawl_tools.py",

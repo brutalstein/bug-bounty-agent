@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import hashlib
 import json
 import os
+from pathlib import Path
 import urllib.error
 import urllib.request
 
@@ -23,6 +24,7 @@ _UNSET = object()
 _OLLAMA_MODEL_CACHE: str | None | object = _UNSET
 _REDACTOR = EvidenceRedactor()
 _LLM_CACHE: dict[str, "LLMResponse"] = {}
+_LLM_TRACE_PATH: Path | None = None
 
 ANALYSIS_SYSTEM_PROMPT = (
     "You are a senior bug bounty triage assistant reviewing authorized, read-only scan results. "
@@ -44,6 +46,16 @@ class LLMResponse:
     fallback_used: bool
     backend: str = "fallback"
     cache_hit: bool = False
+
+
+def configure_trace_file(path: str | Path | None) -> None:
+    global _LLM_TRACE_PATH
+    if path is None:
+        _LLM_TRACE_PATH = None
+        return
+    _LLM_TRACE_PATH = Path(path)
+    _LLM_TRACE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    _LLM_TRACE_PATH.touch(exist_ok=True)
 
 
 def is_openai_available() -> bool:
@@ -112,7 +124,7 @@ def _run_json_task(
     cache_key = _make_cache_key(task, payload, backend_order)
     cached = _LLM_CACHE.get(cache_key)
     if cached is not None:
-        return LLMResponse(
+        response = LLMResponse(
             text=cached.text,
             success=cached.success,
             model=cached.model,
@@ -120,6 +132,17 @@ def _run_json_task(
             backend=cached.backend,
             cache_hit=True,
         )
+        _write_trace(
+            task=task,
+            backend=response.backend,
+            model=response.model,
+            cache_hit=True,
+            fallback_used=response.fallback_used,
+            schema_valid=True,
+            redaction_applied=True,
+            payload=payload,
+        )
+        return response
 
     for backend in backend_order:
         if backend == "openai" and is_openai_available():
@@ -127,6 +150,16 @@ def _run_json_task(
             response = _normalize_backend_response(raw_response, normalizer, model=OPENAI_MODEL, backend="openai")
             if response is not None:
                 _LLM_CACHE[cache_key] = response
+                _write_trace(
+                    task=task,
+                    backend="openai",
+                    model=OPENAI_MODEL,
+                    cache_hit=False,
+                    fallback_used=False,
+                    schema_valid=True,
+                    redaction_applied=True,
+                    payload=payload,
+                )
                 return response
         elif backend == "ollama" and is_ollama_available():
             resolved_model = _resolved_ollama_model_name()
@@ -134,6 +167,16 @@ def _run_json_task(
             response = _normalize_backend_response(raw_response, normalizer, model=resolved_model or OLLAMA_MODEL, backend="ollama")
             if response is not None:
                 _LLM_CACHE[cache_key] = response
+                _write_trace(
+                    task=task,
+                    backend="ollama",
+                    model=resolved_model or OLLAMA_MODEL,
+                    cache_hit=False,
+                    fallback_used=False,
+                    schema_valid=True,
+                    redaction_applied=True,
+                    payload=payload,
+                )
                 return response
         elif backend == "fallback":
             break
@@ -146,6 +189,16 @@ def _run_json_task(
         backend="fallback",
     )
     _LLM_CACHE[cache_key] = fallback_response
+    _write_trace(
+        task=task,
+        backend="fallback",
+        model="rule-based-fallback",
+        cache_hit=False,
+        fallback_used=True,
+        schema_valid=True,
+        redaction_applied=True,
+        payload=payload,
+    )
     return fallback_response
 
 
@@ -371,6 +424,34 @@ def _make_cache_key(task: str, payload: dict, backend_order: list[str]) -> str:
         sort_keys=True,
     )
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def _write_trace(
+    *,
+    task: str,
+    backend: str,
+    model: str,
+    cache_hit: bool,
+    fallback_used: bool,
+    schema_valid: bool,
+    redaction_applied: bool,
+    payload: dict,
+) -> None:
+    if _LLM_TRACE_PATH is None:
+        return
+    compact_input = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    record = {
+        "task": task,
+        "backend": backend,
+        "model": model,
+        "cache_hit": cache_hit,
+        "fallback_used": fallback_used,
+        "schema_valid": schema_valid,
+        "redaction_applied": redaction_applied,
+        "input_hash": hashlib.sha1(compact_input.encode("utf-8")).hexdigest()[:16],
+    }
+    with _LLM_TRACE_PATH.open("a", encoding="utf-8") as file:
+        file.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
 def _compact_signal(signal_json: dict, available_methods: list[str] | None = None) -> dict:

@@ -314,9 +314,9 @@ main() {
   if [[ "$#" -eq 0 ]]; then
     say_info "Environment is ready. Launching the autonomous agent."
     if [[ -n "$DEFAULT_PROFILE" ]]; then
-      run_cli interactive --profile "$DEFAULT_PROFILE"
+      run_cli interactive --profile "$DEFAULT_PROFILE" --max-cycles 3
     else
-      run_cli interactive --profile airtable-staging-public-h1
+      run_cli interactive --profile airtable-staging-public-h1 --max-cycles 3
     fi
     return 0
   fi

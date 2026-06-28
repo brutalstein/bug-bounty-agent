@@ -11,6 +11,11 @@ from urllib.request import (
 import time
 import json
 
+from core.request_budget import (
+    RequestBudgetExceeded,
+    get_active_request_budget,
+)
+
 
 @dataclass
 class RedirectHop:
@@ -54,6 +59,7 @@ class SafeHttpClient:
     ):
         self.user_agent = user_agent
         self.timeout_seconds = timeout_seconds
+        self.budget_manager = get_active_request_budget()
 
     class _NoRedirectHandler(HTTPRedirectHandler):
         def redirect_request(self, req, fp, code, msg, headers, newurl):
@@ -120,9 +126,21 @@ class SafeHttpClient:
         current_body = body
         redirect_chain: list[RedirectHop] = []
         opener = build_opener(self._NoRedirectHandler())
+        budget_manager = self.budget_manager or get_active_request_budget()
+
+        def finish(response: HttpResponse) -> HttpResponse:
+            if budget_manager is not None:
+                budget_manager.record_http_result(
+                    response=response,
+                    method=current_method,
+                    url=current_url,
+                )
+            return response
 
         try:
             for _ in range(max_redirects + 1):
+                if budget_manager is not None:
+                    budget_manager.assert_request_allowed(units=1)
                 request = Request(
                     current_url,
                     data=current_body,
@@ -165,7 +183,7 @@ class SafeHttpClient:
                 body_bytes = response.read(1_000_000)
                 response_body = body_bytes.decode("utf-8", errors="ignore")
 
-                return HttpResponse(
+                return finish(HttpResponse(
                     url=url,
                     final_url=response.geturl(),
                     status_code=status_code,
@@ -178,9 +196,9 @@ class SafeHttpClient:
                     response_time_seconds=round(time.time() - start, 3),
                     success=True,
                     error=None,
-                )
+                ))
 
-            return HttpResponse(
+            return finish(HttpResponse(
                 url=url,
                 final_url=current_url,
                 status_code=None,
@@ -193,6 +211,22 @@ class SafeHttpClient:
                 response_time_seconds=round(time.time() - start, 3),
                 success=False,
                 error=f"Too many redirects (>{max_redirects})",
+            ))
+
+        except RequestBudgetExceeded as error:
+            return HttpResponse(
+                url=url,
+                final_url=current_url,
+                status_code=None,
+                content_type=None,
+                server=None,
+                headers={},
+                set_cookie_headers=[],
+                redirect_chain=[item.to_dict() for item in redirect_chain],
+                body="",
+                response_time_seconds=round(time.time() - start, 3),
+                success=False,
+                error=str(error),
             )
 
         except HTTPError as error:
@@ -203,7 +237,7 @@ class SafeHttpClient:
             except Exception:
                 body = ""
 
-            return HttpResponse(
+            return finish(HttpResponse(
                 url=url,
                 final_url=url,
                 status_code=error.code,
@@ -222,10 +256,10 @@ class SafeHttpClient:
                 response_time_seconds=round(time.time() - start, 3),
                 success=False,
                 error=f"HTTP error: {error.code}",
-            )
+            ))
 
         except URLError as error:
-            return HttpResponse(
+            return finish(HttpResponse(
                 url=url,
                 final_url=None,
                 status_code=None,
@@ -238,10 +272,10 @@ class SafeHttpClient:
                 response_time_seconds=round(time.time() - start, 3),
                 success=False,
                 error=str(error),
-            )
+            ))
 
         except Exception as error:
-            return HttpResponse(
+            return finish(HttpResponse(
                 url=url,
                 final_url=None,
                 status_code=None,
@@ -254,4 +288,4 @@ class SafeHttpClient:
                 response_time_seconds=round(time.time() - start, 3),
                 success=False,
                 error=str(error),
-            )
+            ))

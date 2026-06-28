@@ -89,6 +89,8 @@ class SignalDetector:
         js_analysis = self._read_json(self.parsed_dir / "js_analysis.json")
         ranked_candidates = self._read_json(self.parsed_dir / "ranked_candidates.json")
         session_compare = self._read_json(self.parsed_dir / "session_compare.json")
+        high_value_recon = self._read_json(self.parsed_dir / "high_value_recon.json")
+        passive_surface_diff = self._read_json(self.parsed_dir / "passive_surface_diff.json")
 
         signals: list[VulnSignal] = []
         seen: set[tuple[str, str]] = set()
@@ -97,6 +99,8 @@ class SignalDetector:
         signals.extend(self._signals_from_js_analysis(js_analysis, seen))
         signals.extend(self._signals_from_ranked_candidates(ranked_candidates, seen))
         signals.extend(self._signals_from_session_compare(session_compare, seen))
+        signals.extend(self._signals_from_high_value_recon(high_value_recon, seen))
+        signals.extend(self._signals_from_passive_surface_diff(passive_surface_diff, seen))
         signals = [self._apply_policy_alignment(item) for item in signals]
 
         sorted_signals = sorted(
@@ -447,6 +451,204 @@ class SignalDetector:
                             "review_signal": str(item.get("review_signal", "")),
                             "notes": item.get("notes", []),
                         },
+                    )
+                )
+
+            if item.get("sensitive_indicators_added") and (
+                item.get("cache_validator_reused") is True
+                or item.get("auth_vary_missing") is True
+            ):
+                signals.append(
+                    self._make_signal(
+                        seen=seen,
+                        signal_type="SENSITIVE_DATA",
+                        endpoint=url,
+                        priority="HIGH",
+                        confidence=0.76,
+                        bounty_potential="$$",
+                        evidence={
+                            "matched_rule": "session_compare_sensitive_cache_boundary_drift",
+                            "review_signal": str(item.get("review_signal", "")),
+                            "variant_findings": item.get("variant_findings", []),
+                            "sensitive_indicators_added": item.get("sensitive_indicators_added", []),
+                        },
+                    )
+                )
+
+            if item.get("method_exposure_changed") is True and item.get("write_methods_exposed"):
+                signals.append(
+                    self._make_signal(
+                        seen=seen,
+                        signal_type="INFO_DISCLOSURE",
+                        endpoint=url,
+                        priority="MEDIUM",
+                        confidence=0.58,
+                        bounty_potential="$",
+                        evidence={
+                            "matched_rule": "session_compare_method_surface_changed",
+                            "write_methods_exposed": item.get("write_methods_exposed", []),
+                            "variant_findings": item.get("variant_findings", []),
+                        },
+                    )
+                )
+
+            if item.get("cache_validator_reused") is True or item.get("auth_vary_missing") is True:
+                signals.append(
+                    self._make_signal(
+                        seen=seen,
+                        signal_type="INFO_DISCLOSURE",
+                        endpoint=url,
+                        priority="MEDIUM",
+                        confidence=0.52,
+                        bounty_potential="$",
+                        evidence={
+                            "matched_rule": "session_compare_cache_boundary_hint",
+                            "cache_validator_reused": item.get("cache_validator_reused", False),
+                            "auth_vary_missing": item.get("auth_vary_missing", False),
+                            "review_signal": str(item.get("review_signal", "")),
+                        },
+                    )
+                )
+
+        return [item for item in signals if item is not None]
+
+    def _signals_from_high_value_recon(
+        self,
+        high_value_recon: dict,
+        seen: set[tuple[str, str]],
+    ) -> list[VulnSignal]:
+        items = high_value_recon.get("items", []) if isinstance(high_value_recon, dict) else []
+        if not isinstance(items, list):
+            return []
+
+        signals: list[VulnSignal] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+
+            target = str(item.get("target", "")).strip()
+            probe_kind = str(item.get("probe_kind", "")).strip().lower()
+            status_code = item.get("status_code")
+            matched_signals = item.get("matched_signals", [])
+            route_count = len(item.get("extracted_routes", [])) if isinstance(item.get("extracted_routes", []), list) else 0
+            sensitive_indicators = item.get("sensitive_indicators", [])
+
+            evidence = {
+                "matched_rule": f"high_value_recon:{probe_kind}",
+                "probe_kind": probe_kind,
+                "status_code": status_code,
+                "matched_signals": matched_signals,
+                "route_count": route_count,
+                "sensitive_indicators": sensitive_indicators,
+            }
+
+            if item.get("exposure_likely") is True and sensitive_indicators:
+                signals.append(
+                    self._make_signal(
+                        seen=seen,
+                        signal_type="SENSITIVE_DATA",
+                        endpoint=target,
+                        priority="HIGH",
+                        confidence=0.78,
+                        bounty_potential="$$",
+                        evidence={**evidence, "matched_rule": "high_value_recon_sensitive_exposure"},
+                    )
+                )
+
+            if probe_kind == "api_metadata" and status_code == 200 and any(
+                str(signal).startswith("api_metadata_marker=") for signal in matched_signals
+            ):
+                signals.append(
+                    self._make_signal(
+                        seen=seen,
+                        signal_type="AUTH_BYPASS",
+                        endpoint=target,
+                        priority="HIGH",
+                        confidence=0.72,
+                        bounty_potential="$$$",
+                        evidence={**evidence, "matched_rule": "unauthenticated_api_metadata_surface"},
+                    )
+                )
+
+            if probe_kind == "api_schema" and status_code == 200 and route_count >= 6:
+                signals.append(
+                    self._make_signal(
+                        seen=seen,
+                        signal_type="INFO_DISCLOSURE",
+                        endpoint=target,
+                        priority="MEDIUM",
+                        confidence=0.5,
+                        bounty_potential="$",
+                        evidence={**evidence, "matched_rule": "public_api_schema_with_multiple_routes"},
+                    )
+                )
+
+            if probe_kind == "client_config" and status_code == 200 and route_count >= 3:
+                signals.append(
+                    self._make_signal(
+                        seen=seen,
+                        signal_type="INFO_DISCLOSURE",
+                        endpoint=target,
+                        priority="MEDIUM",
+                        confidence=0.48,
+                        bounty_potential="$",
+                        evidence={**evidence, "matched_rule": "client_config_exposes_multiple_high_value_routes"},
+                    )
+                )
+
+            if probe_kind == "auth_config" and status_code == 200 and any(
+                str(signal).startswith("auth_config_key=") for signal in matched_signals
+            ):
+                signals.append(
+                    self._make_signal(
+                        seen=seen,
+                        signal_type="JWT_ISSUES",
+                        endpoint=target,
+                        priority="MEDIUM",
+                        confidence=0.42,
+                        bounty_potential="$",
+                        evidence={**evidence, "matched_rule": "public_auth_configuration_surface"},
+                    )
+                )
+
+        return [item for item in signals if item is not None]
+
+    def _signals_from_passive_surface_diff(
+        self,
+        passive_surface_diff: dict,
+        seen: set[tuple[str, str]],
+    ) -> list[VulnSignal]:
+        hypotheses = passive_surface_diff.get("hypotheses", []) if isinstance(passive_surface_diff, dict) else []
+        if not isinstance(hypotheses, list):
+            return []
+
+        signals: list[VulnSignal] = []
+        for hypothesis in hypotheses:
+            if not isinstance(hypothesis, dict):
+                continue
+            category = str(hypothesis.get("category", "")).strip().lower()
+            affected_surfaces = hypothesis.get("affected_surfaces", [])
+            if not isinstance(affected_surfaces, list) or not affected_surfaces:
+                continue
+
+            endpoint = str(affected_surfaces[0]).strip()
+            evidence = {
+                "matched_rule": "passive_surface_diff_hypothesis",
+                "category": category,
+                "supporting_signals": hypothesis.get("supporting_signals", []),
+                "safe_next_steps": hypothesis.get("safe_next_steps", []),
+            }
+
+            if category in {"auth_surface_cache_policy_review", "session_cache_key_review", "api_surface_cache_review"}:
+                signals.append(
+                    self._make_signal(
+                        seen=seen,
+                        signal_type="INFO_DISCLOSURE",
+                        endpoint=endpoint,
+                        priority="LOW",
+                        confidence=0.38,
+                        bounty_potential="$",
+                        evidence=evidence,
                     )
                 )
 

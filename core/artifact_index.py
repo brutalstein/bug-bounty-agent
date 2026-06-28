@@ -46,6 +46,8 @@ class ArtifactIndexBuilder:
         signals = self._read_json(self.parsed_dir / "signals.json")
         deep_hunt = self._read_json(self.parsed_dir / "deep_hunt.json")
         llm_usage = self._read_json(self.parsed_dir / "llm_usage.json")
+        artifact_refresh_state = self._read_json(self.parsed_dir / "artifact_refresh_state.json")
+        request_budget = self._read_json(self.parsed_dir / "request_budget.json")
         review_queue = self._read_json(self.parsed_dir / "review_queue.json")
         browser_evidence = self._read_json(self.parsed_dir / "browser_evidence.json")
         evidence_pack = self._read_json(self.evidence_dir / "evidence_pack.json")
@@ -103,7 +105,12 @@ class ArtifactIndexBuilder:
                 self.parsed_dir / "session_compare.json",
                 self.parsed_dir / "signals.json",
                 self.parsed_dir / "deep_hunt.json",
+                self.parsed_dir / "deep_hunt_strategy.json",
                 self.parsed_dir / "llm_usage.json",
+                self.parsed_dir / "llm_traces.jsonl",
+                self.parsed_dir / "artifact_refresh_state.json",
+                self.parsed_dir / "request_budget.json",
+                self.parsed_dir / "request_budget_snapshots.jsonl",
                 self.parsed_dir / "agent_summary.json",
                 self.parsed_dir / "browser_evidence.json",
                 self.parsed_dir / "normalized_findings.json",
@@ -146,6 +153,8 @@ class ArtifactIndexBuilder:
             signals=signals,
             deep_hunt=deep_hunt,
             llm_usage=llm_usage,
+            artifact_refresh_state=artifact_refresh_state,
+            request_budget=request_budget,
             review_queue=review_queue,
             evidence_pack=evidence_pack,
             browser_evidence=browser_evidence,
@@ -175,6 +184,8 @@ class ArtifactIndexBuilder:
         signals: dict,
         deep_hunt: dict,
         llm_usage: dict,
+        artifact_refresh_state: dict,
+        request_budget: dict,
         review_queue: dict,
         evidence_pack: dict,
         browser_evidence: dict,
@@ -238,11 +249,18 @@ class ArtifactIndexBuilder:
             lines.append(f"- **High Signals:** `{signals.get('high_count', 0)}`")
         if deep_hunt:
             lines.append(f"- **Deep Hunt Investigated:** `{deep_hunt.get('investigated_count', 0)}`")
+        if request_budget:
+            lines.append(f"- **Request Budget Used:** `{request_budget.get('total_requests', 0)}` / `{request_budget.get('total_request_limit', 0)}`")
+            lines.append(f"- **Request Budget Stop Reason:** `{request_budget.get('stop_reason', '')}`")
+            lines.append(f"- **Request Error Rate:** `{request_budget.get('error_rate', 0)}`")
         lines.append(f"- **Deep Hunt Escalated:** `{deep_hunt.get('escalated_count', 0)}`")
         if llm_usage:
             lines.append(f"- **LLM Backend:** `{llm_usage.get('backend', 'unknown')}`")
             lines.append(f"- **LLM Budget Used:** `{llm_usage.get('budget_used', 0)}/{llm_usage.get('budget_limit', 0)}`")
             lines.append(f"- **LLM Calls:** `{len(llm_usage.get('events', []))}`")
+        if artifact_refresh_state:
+            lines.append(f"- **Artifact Refresh Mode:** `{artifact_refresh_state.get('mode', 'unknown')}`")
+            lines.append(f"- **Artifact Refresh Stages:** `{artifact_refresh_state.get('stages_run', [])}`")
         agent_summary = self._read_json(self.parsed_dir / "agent_summary.json")
         if agent_summary:
             lines.append(f"- **Autonomous Agent Cycles:** `{agent_summary.get('cycle_count', 0)}`")

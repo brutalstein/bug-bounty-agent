@@ -779,11 +779,26 @@ class TriageEngine:
         return candidates
 
     def _session_compare_category(self, item: dict) -> str:
+        if item.get("sensitive_indicators_added") and (
+            item.get("cache_validator_reused") is True
+            or item.get("auth_vary_missing") is True
+        ):
+            return "authenticated_sensitive_cache_boundary_review"
+
         if item.get("sensitive_indicators_added"):
             return "authenticated_sensitive_response_review"
 
         if item.get("accessibility_changed") is True or item.get("auth_requirement_changed") is True:
             return "authenticated_access_boundary_review"
+
+        if item.get("method_exposure_changed") is True and item.get("write_methods_exposed"):
+            return "authenticated_method_surface_review"
+
+        if item.get("cache_validator_reused") is True or item.get("auth_vary_missing") is True:
+            return "authenticated_cache_key_segregation_review"
+
+        if item.get("representation_changed") is True or item.get("cors_policy_changed") is True:
+            return "authenticated_representation_drift_review"
 
         if item.get("cache_policy_changed") is True and (
             int(item.get("unauth_auth_cookie_count", 0)) > 0
