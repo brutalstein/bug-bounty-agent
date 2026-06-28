@@ -63,6 +63,7 @@ def test_authorized_cycle_plans_skip_redundant_report_refresh():
             )
             assert deep_hunt_follow_up is not None
             assert deep_hunt_follow_up.get("llm_profile") in {"speed", "balanced"}
+            assert deep_hunt_follow_up.get("llm_provider") in {"auto", "openai", "ollama"}
 
 
 def test_surface_recon_settings_expand_for_airtable_capabilities():
@@ -186,8 +187,13 @@ def test_decision_driven_plan_carries_strategy_pack(tmp_path):
         "deep_hunt_ruled_out": 0,
         "top_signal_types": ["BROKEN_ACCESS_CONTROL"],
         "recommended_llm_profile": "quality",
+        "recommended_llm_provider": "openai",
+        "recommended_reasoning_model": "gpt-5.5-mini",
+        "recommended_report_model": "gpt-5.5",
         "llm_profile_source": "focus_boundary_hotspot",
         "llm_profile_reason": "Boundary hotspots deserve deeper reasoning.",
+        "llm_provider_source": "quality_cloud_preference",
+        "llm_provider_reason": "Quality cycles use cloud reasoning.",
     }
     from core.autonomous_agent import RunEvaluation
 
@@ -203,6 +209,9 @@ def test_decision_driven_plan_carries_strategy_pack(tmp_path):
     assert follow_up["strategy_pack"] == "boundary_cache_auth_investigator"
     assert follow_up["signal_type"] == "BROKEN_ACCESS_CONTROL"
     assert follow_up["llm_profile"] == "quality"
+    assert follow_up["llm_provider"] == "openai"
+    assert follow_up["reasoning_model"] == "gpt-5.5-mini"
+    assert follow_up["report_model"] == "gpt-5.5"
     assert follow_up["preferred_methods"][:2] == [
         "session_boundary_evidence_review",
         "cache_auth_boundary_investigator",
@@ -250,8 +259,13 @@ def test_apply_decision_strategy_to_plan_updates_deep_hunt_follow_up():
         deep_hunt_ruled_out=0,
         top_signal_types=["INFO_DISCLOSURE"],
         recommended_llm_profile="balanced",
+        recommended_llm_provider="ollama",
+        recommended_reasoning_model="qwen3:8b",
+        recommended_report_model="llama3.1:8b",
         llm_profile_source="focus_boundary_mapping",
         llm_profile_reason="Session boundary review needs balanced depth.",
+        llm_provider_source="balanced_local_default",
+        llm_provider_reason="Local backend is preferred.",
     )
     plan = {
         "flow_name": "surface-recon",
@@ -270,6 +284,9 @@ def test_apply_decision_strategy_to_plan_updates_deep_hunt_follow_up():
     assert follow_up["signal_type"] == "INFO_DISCLOSURE"
     assert follow_up["strategy_pack"] == "session_boundary_mapper"
     assert follow_up["llm_profile"] == "balanced"
+    assert follow_up["llm_provider"] == "ollama"
+    assert follow_up["reasoning_model"] == "qwen3:8b"
+    assert follow_up["report_model"] == "llama3.1:8b"
     assert follow_up["preferred_methods"] == [
         "session_boundary_evidence_review",
         "readonly_variant_matrix_review",
@@ -284,6 +301,9 @@ def test_execute_follow_up_applies_llm_profile(monkeypatch, tmp_path):
         observed["run_dir"] = str(run_dir)
         observed["kwargs"] = dict(kwargs)
         observed["llm_profile"] = llm_client.effective_llm_profile()
+        observed["llm_provider"] = llm_client.effective_llm_provider()
+        observed["reasoning_model"] = llm_client.effective_openai_reasoning_model()
+        observed["report_model"] = llm_client.effective_openai_report_model()
         return 0
 
     monkeypatch.setattr("core.autonomous_agent.run_deep_hunt_internal", fake_run_deep_hunt_internal)
@@ -298,6 +318,9 @@ def test_execute_follow_up_applies_llm_profile(monkeypatch, tmp_path):
             "strategy_pack": "developer_surface_expander",
             "preferred_methods": ["js_context_review"],
             "llm_profile": "speed",
+            "llm_provider": "openai",
+            "reasoning_model": "gpt-5.5-mini",
+            "report_model": "gpt-5.5",
         },
         run_dir,
     )
@@ -307,6 +330,10 @@ def test_execute_follow_up_applies_llm_profile(monkeypatch, tmp_path):
     assert observed["kwargs"]["strategy_pack"] == "developer_surface_expander"
     assert observed["kwargs"]["preferred_methods"] == ["js_context_review"]
     assert observed["llm_profile"] == "speed"
+    assert observed["llm_provider"] == "openai"
+    assert observed["reasoning_model"] == "gpt-5.5-mini"
+    assert observed["report_model"] == "gpt-5.5"
+    assert llm_client.effective_llm_provider() == "auto"
 
 
 def test_decision_driven_plan_prefers_unsuppressed_targets(tmp_path):
@@ -362,8 +389,13 @@ def test_decision_driven_plan_prefers_unsuppressed_targets(tmp_path):
         deep_hunt_ruled_out=1,
         top_signal_types=["INFO_DISCLOSURE"],
         recommended_llm_profile="speed",
+        recommended_llm_provider="ollama",
+        recommended_reasoning_model="qwen3:8b",
+        recommended_report_model="llama3.1:8b",
         llm_profile_source="focus_surface_expansion",
         llm_profile_reason="Developer exploration can stay fast.",
+        llm_provider_source="speed_local_preference",
+        llm_provider_reason="Fast cycles prefer local models.",
     )
 
     plan = agent._decision_driven_plan(scope, evaluation, used_targets=[])  # noqa: SLF001

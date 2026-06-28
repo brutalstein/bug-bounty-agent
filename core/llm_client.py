@@ -27,6 +27,11 @@ LLM_PROFILE = os.getenv("LLM_PROFILE", "balanced").strip().lower()
 LLM_TIMEOUT = int(os.getenv("LLM_TIMEOUT_SECONDS", "30"))
 _UNSET = object()
 _RUNTIME_LLM_PROFILE: str | None = None
+_RUNTIME_LLM_PROVIDER: str | None = None
+_RUNTIME_OPENAI_REASONING_MODEL: str | None = None
+_RUNTIME_OPENAI_REPORT_MODEL: str | None = None
+_RUNTIME_OLLAMA_MODEL: str | None = None
+_RUNTIME_OLLAMA_REPORT_MODEL: str | None = None
 _OLLAMA_MODEL_CACHE: dict[str, str | None | object] = {}
 _REDACTOR = EvidenceRedactor()
 _LLM_CACHE: dict[str, "LLMResponse"] = {}
@@ -88,26 +93,108 @@ def effective_llm_profile() -> str:
     return normalized if normalized in {"speed", "balanced", "quality"} else "balanced"
 
 
+def effective_llm_provider() -> str:
+    configured = _RUNTIME_LLM_PROVIDER
+    if configured is None:
+        configured = os.getenv("LLM_PROVIDER", LLM_PROVIDER)
+    normalized = str(configured or "").strip().lower()
+    return normalized if normalized in {"auto", "openai", "ollama", "fallback"} else "auto"
+
+
+def effective_openai_reasoning_model() -> str:
+    return str(_RUNTIME_OPENAI_REASONING_MODEL or OPENAI_REASONING_MODEL or OPENAI_MODEL).strip()
+
+
+def effective_openai_report_model() -> str:
+    return str(_RUNTIME_OPENAI_REPORT_MODEL or OPENAI_REPORT_MODEL or OPENAI_MODEL).strip()
+
+
+def effective_ollama_reasoning_model() -> str:
+    return str(_RUNTIME_OLLAMA_MODEL or OLLAMA_MODEL).strip()
+
+
+def effective_ollama_report_model() -> str:
+    return str(_RUNTIME_OLLAMA_REPORT_MODEL or OLLAMA_REPORT_MODEL or OLLAMA_MODEL).strip()
+
+
+def llm_runtime_snapshot() -> dict[str, object]:
+    return {
+        "provider": effective_llm_provider(),
+        "profile": effective_llm_profile(),
+        "openai_available": bool(OPENAI_API_KEY),
+        "openai_reasoning_model": effective_openai_reasoning_model(),
+        "openai_report_model": effective_openai_report_model(),
+        "ollama_reasoning_model": effective_ollama_reasoning_model(),
+        "ollama_report_model": effective_ollama_report_model(),
+        "ollama_base_url": OLLAMA_BASE_URL,
+    }
+
+
 @contextmanager
 def temporary_llm_profile(profile: str | None):
+    with temporary_llm_runtime(profile=profile) as snapshot:
+        yield snapshot["profile"]
+
+
+@contextmanager
+def temporary_llm_runtime(
+    *,
+    profile: str | None = None,
+    provider: str | None = None,
+    openai_reasoning_model: str | None = None,
+    openai_report_model: str | None = None,
+    ollama_reasoning_model: str | None = None,
+    ollama_report_model: str | None = None,
+):
     global _RUNTIME_LLM_PROFILE
+    global _RUNTIME_LLM_PROVIDER
+    global _RUNTIME_OPENAI_REASONING_MODEL
+    global _RUNTIME_OPENAI_REPORT_MODEL
+    global _RUNTIME_OLLAMA_MODEL
+    global _RUNTIME_OLLAMA_REPORT_MODEL
     previous_runtime = _RUNTIME_LLM_PROFILE
+    previous_provider = _RUNTIME_LLM_PROVIDER
+    previous_openai_reasoning_model = _RUNTIME_OPENAI_REASONING_MODEL
+    previous_openai_report_model = _RUNTIME_OPENAI_REPORT_MODEL
+    previous_ollama_model = _RUNTIME_OLLAMA_MODEL
+    previous_ollama_report_model = _RUNTIME_OLLAMA_REPORT_MODEL
     previous_env = os.environ.get("LLM_PROFILE")
+    previous_provider_env = os.environ.get("LLM_PROVIDER")
     normalized = str(profile or "").strip().lower()
+    normalized_provider = str(provider or "").strip().lower()
     applied = normalized if normalized in {"speed", "balanced", "quality"} else None
+    applied_provider = normalized_provider if normalized_provider in {"auto", "openai", "ollama", "fallback"} else None
     _RUNTIME_LLM_PROFILE = applied
+    _RUNTIME_LLM_PROVIDER = applied_provider
+    _RUNTIME_OPENAI_REASONING_MODEL = str(openai_reasoning_model or "").strip() or None
+    _RUNTIME_OPENAI_REPORT_MODEL = str(openai_report_model or "").strip() or None
+    _RUNTIME_OLLAMA_MODEL = str(ollama_reasoning_model or "").strip() or None
+    _RUNTIME_OLLAMA_REPORT_MODEL = str(ollama_report_model or "").strip() or None
     if applied is None:
         os.environ.pop("LLM_PROFILE", None)
     else:
         os.environ["LLM_PROFILE"] = applied
+    if applied_provider is None:
+        os.environ.pop("LLM_PROVIDER", None)
+    else:
+        os.environ["LLM_PROVIDER"] = applied_provider
     try:
-        yield effective_llm_profile()
+        yield llm_runtime_snapshot()
     finally:
         _RUNTIME_LLM_PROFILE = previous_runtime
+        _RUNTIME_LLM_PROVIDER = previous_provider
+        _RUNTIME_OPENAI_REASONING_MODEL = previous_openai_reasoning_model
+        _RUNTIME_OPENAI_REPORT_MODEL = previous_openai_report_model
+        _RUNTIME_OLLAMA_MODEL = previous_ollama_model
+        _RUNTIME_OLLAMA_REPORT_MODEL = previous_ollama_report_model
         if previous_env is None:
             os.environ.pop("LLM_PROFILE", None)
         else:
             os.environ["LLM_PROFILE"] = previous_env
+        if previous_provider_env is None:
+            os.environ.pop("LLM_PROVIDER", None)
+        else:
+            os.environ["LLM_PROVIDER"] = previous_provider_env
 
 
 def is_openai_available() -> bool:
@@ -283,11 +370,12 @@ def _run_json_task(
 
 def _backend_order(task: str) -> list[str]:
     task = task.strip().lower()
-    if LLM_PROVIDER == "openai":
+    provider = effective_llm_provider()
+    if provider == "openai":
         return ["openai", "ollama", "fallback"]
-    if LLM_PROVIDER == "ollama":
+    if provider == "ollama":
         return ["ollama", "openai", "fallback"]
-    if LLM_PROVIDER == "fallback":
+    if provider == "fallback":
         return ["fallback"]
 
     profile = effective_llm_profile()
@@ -431,7 +519,7 @@ def _fetch_ollama_tags() -> list[dict] | None:
 
 
 def _resolved_ollama_model_name() -> str | None:
-    return _resolve_ollama_model_name(OLLAMA_MODEL)
+    return _resolve_ollama_model_name(effective_ollama_reasoning_model())
 
 
 def _resolved_ollama_model_name_for_task(task: str) -> str | None:
@@ -472,14 +560,14 @@ def _resolve_ollama_model_name(requested_model: str | None) -> str | None:
 
 def _openai_model_for_task(task: str) -> str:
     if task == "report_section":
-        return OPENAI_REPORT_MODEL or OPENAI_MODEL
-    return OPENAI_REASONING_MODEL or OPENAI_MODEL
+        return effective_openai_report_model() or OPENAI_MODEL
+    return effective_openai_reasoning_model() or OPENAI_MODEL
 
 
 def _ollama_model_for_task(task: str) -> str:
     if task == "report_section":
-        return OLLAMA_REPORT_MODEL or OLLAMA_MODEL
-    return OLLAMA_MODEL
+        return effective_ollama_report_model() or OLLAMA_MODEL
+    return effective_ollama_reasoning_model() or OLLAMA_MODEL
 
 
 def _ollama_task_options(task: str) -> dict[str, float | int]:
@@ -538,10 +626,11 @@ def _extract_json_object(text: str) -> str | None:
 
 
 def _make_cache_key(task: str, payload: dict, backend_order: list[str]) -> str:
+    runtime = llm_runtime_snapshot()
     normalized = json.dumps(
         {
             "task": task,
-            "llm_profile": effective_llm_profile(),
+            "runtime": runtime,
             "backend_order": backend_order,
             "payload": payload,
         },

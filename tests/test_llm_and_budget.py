@@ -197,6 +197,29 @@ def test_temporary_llm_profile_overrides_runtime(monkeypatch):
     assert llm_client.effective_llm_profile() == "balanced"
 
 
+def test_temporary_llm_runtime_overrides_provider_and_models(monkeypatch):
+    monkeypatch.setattr(llm_client, "LLM_PROVIDER", "auto")
+    monkeypatch.setattr(llm_client, "OPENAI_REASONING_MODEL", "gpt-5.4-mini")
+    monkeypatch.setattr(llm_client, "OPENAI_REPORT_MODEL", "gpt-5.4-mini")
+    monkeypatch.setattr(llm_client, "OLLAMA_MODEL", "qwen3:8b")
+    monkeypatch.setattr(llm_client, "OLLAMA_REPORT_MODEL", "llama3.1:8b")
+
+    with llm_client.temporary_llm_runtime(
+        profile="quality",
+        provider="openai",
+        openai_reasoning_model="gpt-5.5-mini",
+        openai_report_model="gpt-5.5",
+    ) as runtime:
+        assert runtime["profile"] == "quality"
+        assert llm_client.effective_llm_provider() == "openai"
+        assert llm_client.effective_openai_reasoning_model() == "gpt-5.5-mini"
+        assert llm_client.effective_openai_report_model() == "gpt-5.5"
+        assert llm_client._backend_order("signal_analysis") == ["openai", "ollama", "fallback"]  # noqa: SLF001
+
+    assert llm_client.effective_llm_provider() == "auto"
+    assert llm_client.effective_openai_reasoning_model() == "gpt-5.4-mini"
+
+
 def test_request_budget_stop_behavior(tmp_path):
     manager = RequestBudgetManager(
         run_dir=tmp_path,

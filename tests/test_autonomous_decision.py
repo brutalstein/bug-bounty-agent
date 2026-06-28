@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 
+from core import autonomous_decision
 from core.autonomous_decision import AutonomousDecisionEngine
 
 
@@ -249,6 +250,80 @@ def test_autonomous_decision_uses_unresolved_hypothesis_when_hotspots_are_weak(t
     assert summary.recommended_llm_profile in {"quality", "balanced"}
     assert summary.recommended_method_sequence
     assert summary.retryable_hypothesis_count >= 1
+
+
+def test_autonomous_decision_recommends_concrete_llm_runtime(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        autonomous_decision,
+        "llm_runtime_snapshot",
+        lambda: {
+            "provider": "auto",
+            "profile": "balanced",
+            "openai_available": True,
+            "openai_reasoning_model": "gpt-5.5-mini",
+            "openai_report_model": "gpt-5.5",
+            "ollama_reasoning_model": "qwen3:8b",
+            "ollama_report_model": "llama3.1:8b",
+            "ollama_base_url": "http://localhost:11434",
+        },
+    )
+    run_dir = tmp_path / "run-llm"
+    parsed_dir = run_dir / "parsed"
+    reports_dir = run_dir / "reports"
+    parsed_dir.mkdir(parents=True)
+    reports_dir.mkdir(parents=True)
+    (run_dir / "run.json").write_text(
+        json.dumps(
+            {
+                "target_url": "https://staging.airtable.com",
+                "profile_name": "airtable-staging-public-h1",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (parsed_dir / "signals.json").write_text(
+        json.dumps(
+            {
+                "high_count": 0,
+                "critical_count": 0,
+                "total_signals": 1,
+                "signals": [
+                    {
+                        "signal_type": "BROKEN_ACCESS_CONTROL",
+                        "endpoint": "https://api-staging.airtable.com/v0/meta/bases",
+                        "evidence": {"variant_signal_score": 5},
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (parsed_dir / "deep_hunt.json").write_text(
+        json.dumps(
+            {
+                "escalated_count": 0,
+                "signals": [
+                    {
+                        "signal_type": "BROKEN_ACCESS_CONTROL",
+                        "endpoint": "https://api-staging.airtable.com/v0/meta/bases",
+                        "status": "pending",
+                        "findings": [{"kind": "session_boundary_evidence_review"}],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (parsed_dir / "session_compare.json").write_text(json.dumps({"items": []}), encoding="utf-8")
+    (parsed_dir / "review_queue.json").write_text(json.dumps({"start_now_count": 1}), encoding="utf-8")
+    (parsed_dir / "final_report_draft.json").write_text(json.dumps({"candidate_items": 0}), encoding="utf-8")
+
+    summary = AutonomousDecisionEngine(run_dir).build()
+
+    assert summary.recommended_llm_profile == "quality"
+    assert summary.recommended_llm_provider == "openai"
+    assert summary.recommended_reasoning_model == "gpt-5.5-mini"
+    assert summary.recommended_report_model == "gpt-5.5"
 
 
 def test_autonomous_decision_pivots_when_only_suppressed_families_remain(tmp_path):

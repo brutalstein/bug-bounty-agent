@@ -31,7 +31,7 @@ from core.autonomous_decision import AutonomousDecisionEngine
 from core.console import print_status
 from core.http_client import SafeHttpClient
 from core.lab_manager import LabManager
-from core.llm_client import temporary_llm_profile
+from core.llm_client import llm_runtime_snapshot, temporary_llm_runtime
 from core.operator_memory import OperatorMemoryAnalyzer, OperatorMemorySummary
 from core.profile_readiness import ProfileReadinessAssessor
 from core.run_catalog import list_run_dirs as list_real_run_dirs
@@ -100,8 +100,13 @@ class RunEvaluation:
     deep_hunt_ruled_out: int
     top_signal_types: list[str]
     recommended_llm_profile: str = "balanced"
+    recommended_llm_provider: str = "ollama"
+    recommended_reasoning_model: str = ""
+    recommended_report_model: str = ""
     llm_profile_source: str = "focus_default"
     llm_profile_reason: str = ""
+    llm_provider_source: str = "runtime_default"
+    llm_provider_reason: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -499,6 +504,35 @@ class AutonomousAgent:
         target_limit = 10 if scope.capability_enabled("high_value_route_discovery") else 8
         return self._prioritize_targets(scope, selected_target, candidates)[:target_limit]
 
+    def _default_llm_follow_up(self, focus: str) -> dict[str, Any]:
+        runtime = llm_runtime_snapshot()
+        normalized_focus = str(focus or "").strip().lower()
+        profile = "balanced"
+        if normalized_focus in {"developer", "developer_surface_recon"}:
+            profile = "speed"
+        if str(runtime.get("ollama_reasoning_model", "")).strip():
+            provider = "ollama"
+        elif runtime.get("openai_available"):
+            provider = "openai"
+        else:
+            provider = "auto"
+        return {
+            "llm_profile": profile,
+            "llm_provider": provider,
+            "reasoning_model": str(
+                runtime.get(
+                    "ollama_reasoning_model" if provider == "ollama" else "openai_reasoning_model",
+                    "",
+                ) if provider in {"ollama", "openai"} else ""
+            ).strip(),
+            "report_model": str(
+                runtime.get(
+                    "ollama_report_model" if provider == "ollama" else "openai_report_model",
+                    "",
+                ) if provider in {"ollama", "openai"} else ""
+            ).strip(),
+        }
+
     def build_cycle_plans(
         self,
         scope: ScopeManager,
@@ -545,7 +579,7 @@ class AutonomousAgent:
                             {
                                 "label": "Policy-safe deep hunt refresh",
                                 "argv": ["deep-hunt", "{run_dir}"],
-                                "llm_profile": "balanced",
+                                **self._default_llm_follow_up("session_boundary_recon"),
                             },
                         ],
                     }
@@ -579,7 +613,7 @@ class AutonomousAgent:
                         {
                             "label": "Policy-safe deep hunt refresh",
                             "kind": "deep_hunt",
-                            "llm_profile": "balanced",
+                            **self._default_llm_follow_up("api_boundary_recon"),
                         },
                     ],
                 }
@@ -615,7 +649,7 @@ class AutonomousAgent:
                             {
                                 "label": "Policy-safe deep hunt refresh",
                                 "kind": "deep_hunt",
-                                "llm_profile": "balanced",
+                                **self._default_llm_follow_up("session_boundary_recon"),
                             },
                         ],
                     }
@@ -649,7 +683,7 @@ class AutonomousAgent:
                             {
                                 "label": "Policy-safe deep hunt refresh",
                                 "kind": "deep_hunt",
-                                "llm_profile": "speed",
+                                **self._default_llm_follow_up("developer_surface_recon"),
                             },
                         ],
                     }
@@ -723,8 +757,13 @@ class AutonomousAgent:
             strategy_support_runs=decision_summary.strategy_support_runs,
             exploration_pack=decision_summary.exploration_pack,
             recommended_llm_profile=decision_summary.recommended_llm_profile,
+            recommended_llm_provider=decision_summary.recommended_llm_provider,
+            recommended_reasoning_model=decision_summary.recommended_reasoning_model,
+            recommended_report_model=decision_summary.recommended_report_model,
             llm_profile_source=decision_summary.llm_profile_source,
             llm_profile_reason=decision_summary.llm_profile_reason,
+            llm_provider_source=decision_summary.llm_provider_source,
+            llm_provider_reason=decision_summary.llm_provider_reason,
             hypothesis_stage_counts=dict(decision_summary.hypothesis_stage_counts),
             retryable_hypothesis_count=decision_summary.retryable_hypothesis_count,
             suppressed_endpoint_families=list(decision_summary.suppressed_endpoint_families),
@@ -796,8 +835,13 @@ class AutonomousAgent:
             lines.append(f"- **Strategy Support Runs:** `{evaluation.strategy_support_runs}`")
             lines.append(f"- **Exploration Pack:** `{evaluation.exploration_pack}`")
             lines.append(f"- **Recommended LLM Profile:** `{evaluation.recommended_llm_profile}`")
+            lines.append(f"- **Recommended LLM Provider:** `{evaluation.recommended_llm_provider}`")
+            lines.append(f"- **Recommended Reasoning Model:** `{evaluation.recommended_reasoning_model}`")
+            lines.append(f"- **Recommended Report Model:** `{evaluation.recommended_report_model}`")
             lines.append(f"- **LLM Profile Source:** `{evaluation.llm_profile_source}`")
             lines.append(f"- **LLM Profile Reason:** `{evaluation.llm_profile_reason}`")
+            lines.append(f"- **LLM Provider Source:** `{evaluation.llm_provider_source}`")
+            lines.append(f"- **LLM Provider Reason:** `{evaluation.llm_provider_reason}`")
             lines.append(f"- **Hypothesis Stage Counts:** `{evaluation.hypothesis_stage_counts}`")
             lines.append(f"- **Retryable Hypotheses:** `{evaluation.retryable_hypothesis_count}`")
             lines.append(f"- **Suppressed Endpoint Families:** `{evaluation.suppressed_endpoint_families}`")
@@ -997,6 +1041,9 @@ class AutonomousAgent:
                     "strategy_pack": evaluation.recommended_strategy_pack or None,
                     "preferred_methods": list(evaluation.recommended_method_sequence),
                     "llm_profile": evaluation.recommended_llm_profile or None,
+                    "llm_provider": evaluation.recommended_llm_provider or None,
+                    "reasoning_model": evaluation.recommended_reasoning_model or None,
+                    "report_model": evaluation.recommended_report_model or None,
                 },
             ],
         }
@@ -1055,6 +1102,12 @@ class AutonomousAgent:
                 follow_up["preferred_methods"] = list(evaluation.recommended_method_sequence)
             if evaluation.recommended_llm_profile:
                 follow_up["llm_profile"] = evaluation.recommended_llm_profile
+            if evaluation.recommended_llm_provider:
+                follow_up["llm_provider"] = evaluation.recommended_llm_provider
+            if evaluation.recommended_reasoning_model:
+                follow_up["reasoning_model"] = evaluation.recommended_reasoning_model
+            if evaluation.recommended_report_model:
+                follow_up["report_model"] = evaluation.recommended_report_model
         return updated
 
     def execute_plan(self, plan: dict[str, Any]) -> None:
@@ -1071,7 +1124,17 @@ class AutonomousAgent:
                 return
             raise RuntimeError(f"`{follow_up['label']}` failed.")
         if kind == "deep_hunt":
-            with temporary_llm_profile(str(follow_up.get("llm_profile", "")).strip() or None):
+            llm_provider = str(follow_up.get("llm_provider", "")).strip() or None
+            reasoning_model = str(follow_up.get("reasoning_model", "")).strip() or None
+            report_model = str(follow_up.get("report_model", "")).strip() or None
+            with temporary_llm_runtime(
+                profile=str(follow_up.get("llm_profile", "")).strip() or None,
+                provider=llm_provider,
+                openai_reasoning_model=reasoning_model if llm_provider == "openai" else None,
+                openai_report_model=report_model if llm_provider == "openai" else None,
+                ollama_reasoning_model=reasoning_model if llm_provider == "ollama" else None,
+                ollama_report_model=report_model if llm_provider == "ollama" else None,
+            ):
                 if run_deep_hunt_internal(
                     run_dir,
                     signal_type=follow_up.get("signal_type"),
@@ -1345,7 +1408,13 @@ class AutonomousAgent:
         if evaluation.exploration_pack:
             print_status("info", f"Exploration pack: {evaluation.exploration_pack}")
         print_status("info", f"LLM profile: {evaluation.recommended_llm_profile}")
+        print_status("info", f"LLM provider: {evaluation.recommended_llm_provider}")
+        if evaluation.recommended_reasoning_model:
+            print_status("info", f"Reasoning model: {evaluation.recommended_reasoning_model}")
+        if evaluation.recommended_report_model:
+            print_status("info", f"Report model: {evaluation.recommended_report_model}")
         print_status("info", f"LLM profile source: {evaluation.llm_profile_source}")
+        print_status("info", f"LLM provider source: {evaluation.llm_provider_source}")
         print_status("info", f"Hypothesis stages: {evaluation.hypothesis_stage_counts}")
         print_status("info", f"Retryable hypotheses: {evaluation.retryable_hypothesis_count}")
         if evaluation.suppressed_endpoint_families:

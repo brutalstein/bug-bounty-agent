@@ -9,6 +9,7 @@ from urllib.parse import urlparse
 import json
 
 from core.hypothesis_engine import HypothesisLedgerBuilder
+from core.llm_client import llm_runtime_snapshot
 from core.strategy_intelligence import StrategyIntelligenceAnalyzer
 
 
@@ -48,8 +49,13 @@ class AutonomousDecisionSummary:
     strategy_support_runs: int
     exploration_pack: str
     recommended_llm_profile: str
+    recommended_llm_provider: str
+    recommended_reasoning_model: str
+    recommended_report_model: str
     llm_profile_source: str
     llm_profile_reason: str
+    llm_provider_source: str
+    llm_provider_reason: str
     recommended_targets: list[str]
     strongest_hotspots: list[dict]
     hypothesis_stage_counts: dict[str, int]
@@ -133,8 +139,13 @@ class AutonomousDecisionEngine:
         strategy_support_runs = 0
         exploration_pack = ""
         recommended_llm_profile = "balanced"
+        recommended_llm_provider = "ollama"
+        recommended_reasoning_model = ""
+        recommended_report_model = ""
         llm_profile_source = "focus_default"
         llm_profile_reason = "Balanced profile is the safe default for mixed passive triage."
+        llm_provider_source = "runtime_default"
+        llm_provider_reason = "The runtime will prefer the most throughput-friendly available backend."
         rationale: list[str] = []
 
         strongest_hotspot = hotspots[0] if hotspots else None
@@ -310,6 +321,19 @@ class AutonomousDecisionEngine:
             strategy_source=strategy_source,
             strategy_support_runs=strategy_support_runs,
         )
+        (
+            recommended_llm_provider,
+            recommended_reasoning_model,
+            recommended_report_model,
+            llm_provider_source,
+            llm_provider_reason,
+        ) = self._recommend_llm_runtime(
+            recommended_llm_profile=recommended_llm_profile,
+            decision=decision,
+            next_cycle_focus=next_cycle_focus,
+            strategy_source=strategy_source,
+            strategy_support_runs=strategy_support_runs,
+        )
 
         summary = AutonomousDecisionSummary(
             target=str(run_data.get("target_url", "unknown")),
@@ -334,8 +358,13 @@ class AutonomousDecisionEngine:
             strategy_support_runs=strategy_support_runs,
             exploration_pack=exploration_pack,
             recommended_llm_profile=recommended_llm_profile,
+            recommended_llm_provider=recommended_llm_provider,
+            recommended_reasoning_model=recommended_reasoning_model,
+            recommended_report_model=recommended_report_model,
             llm_profile_source=llm_profile_source,
             llm_profile_reason=llm_profile_reason,
+            llm_provider_source=llm_provider_source,
+            llm_provider_reason=llm_provider_reason,
             recommended_targets=recommended_targets,
             strongest_hotspots=[item.to_dict() for item in hotspots[:5]],
             hypothesis_stage_counts=hypothesis_stage_counts,
@@ -712,6 +741,86 @@ class AutonomousDecisionEngine:
             "No strong signal pressure exists yet, so the operator can favor throughput.",
         )
 
+    def _recommend_llm_runtime(
+        self,
+        *,
+        recommended_llm_profile: str,
+        decision: str,
+        next_cycle_focus: str,
+        strategy_source: str,
+        strategy_support_runs: int,
+    ) -> tuple[str, str, str, str, str]:
+        runtime = llm_runtime_snapshot()
+        openai_available = bool(runtime.get("openai_available"))
+        ollama_available = bool(str(runtime.get("ollama_reasoning_model", "")).strip())
+
+        if recommended_llm_profile == "quality":
+            if openai_available:
+                return (
+                    "openai",
+                    str(runtime.get("openai_reasoning_model", "")),
+                    str(runtime.get("openai_report_model", "")),
+                    "quality_cloud_preference",
+                    "Quality-mode cycles prefer the higher-ceiling cloud backend when it is configured.",
+                )
+            if ollama_available:
+                return (
+                    "ollama",
+                    str(runtime.get("ollama_reasoning_model", "")),
+                    str(runtime.get("ollama_report_model", "")),
+                    "quality_local_fallback",
+                    "Quality-mode cycles fell back to the local model stack because no cloud backend is configured.",
+                )
+            return ("fallback", "", "", "quality_no_backend", "No configured LLM backend is available, so rule-based fallback will be used.")
+
+        if next_cycle_focus == "developer_surface_recon" or recommended_llm_profile == "speed":
+            if ollama_available:
+                return (
+                    "ollama",
+                    str(runtime.get("ollama_reasoning_model", "")),
+                    str(runtime.get("ollama_report_model", "")),
+                    "speed_local_preference",
+                    "Fast developer-surface and low-pressure cycles prefer the local backend for lower latency.",
+                )
+            if openai_available:
+                return (
+                    "openai",
+                    str(runtime.get("openai_reasoning_model", "")),
+                    str(runtime.get("openai_report_model", "")),
+                    "speed_cloud_fallback",
+                    "The local backend is not configured, so the cloud backend will handle fast-cycle reasoning.",
+                )
+            return ("fallback", "", "", "speed_no_backend", "No configured LLM backend is available, so rule-based fallback will be used.")
+
+        if strategy_source in {"learned_recent_runs", "exploration_rebalance"} and strategy_support_runs >= 2 and ollama_available:
+            return (
+                "ollama",
+                str(runtime.get("ollama_reasoning_model", "")),
+                str(runtime.get("ollama_report_model", "")),
+                "learned_efficiency_preference",
+                "Recent runs support a lower-latency local backend for this focus area.",
+            )
+
+        if ollama_available:
+            return (
+                "ollama",
+                str(runtime.get("ollama_reasoning_model", "")),
+                str(runtime.get("ollama_report_model", "")),
+                "balanced_local_default",
+                "Balanced cycles default to the local backend to preserve throughput while keeping semantic reasoning online.",
+            )
+        if openai_available:
+            return (
+                "openai",
+                str(runtime.get("openai_reasoning_model", "")),
+                str(runtime.get("openai_report_model", "")),
+                "balanced_cloud_default",
+                "Balanced cycles use the cloud backend because no local reasoning model is configured.",
+            )
+        if decision == "stop_for_human_review":
+            return ("fallback", "", "", "handoff_no_backend", "No configured LLM backend is available during a human-review handoff.")
+        return ("fallback", "", "", "balanced_no_backend", "No configured LLM backend is available, so rule-based fallback will be used.")
+
     def _strategy_pack_support(self, strategy_intelligence, focus: str, strategy_pack: str) -> int:
         pack_scores = getattr(strategy_intelligence, "pack_scores", []) or []
         for item in pack_scores:
@@ -864,8 +973,13 @@ class AutonomousDecisionEngine:
         lines.append(f"- **Strategy Support Runs:** `{summary.strategy_support_runs}`")
         lines.append(f"- **Exploration Pack:** `{summary.exploration_pack}`")
         lines.append(f"- **Recommended LLM Profile:** `{summary.recommended_llm_profile}`")
+        lines.append(f"- **Recommended LLM Provider:** `{summary.recommended_llm_provider}`")
+        lines.append(f"- **Recommended Reasoning Model:** `{summary.recommended_reasoning_model}`")
+        lines.append(f"- **Recommended Report Model:** `{summary.recommended_report_model}`")
         lines.append(f"- **LLM Profile Source:** `{summary.llm_profile_source}`")
         lines.append(f"- **LLM Profile Reason:** `{summary.llm_profile_reason}`")
+        lines.append(f"- **LLM Provider Source:** `{summary.llm_provider_source}`")
+        lines.append(f"- **LLM Provider Reason:** `{summary.llm_provider_reason}`")
         lines.append("")
         if summary.rationale:
             lines.append("## Rationale")
