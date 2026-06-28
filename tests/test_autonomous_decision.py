@@ -85,6 +85,8 @@ def test_autonomous_decision_recommends_boundary_focus(tmp_path):
     assert summary.boundary_hotspot_count == 1
     assert summary.recommended_strategy_pack == "boundary_cache_auth_investigator"
     assert summary.recommended_signal_type == "BROKEN_ACCESS_CONTROL"
+    assert summary.retryable_hypothesis_count >= 0
+    assert isinstance(summary.hypothesis_stage_counts, dict)
     assert summary.recommended_method_sequence[:3] == [
         "session_boundary_evidence_review",
         "cache_auth_boundary_investigator",
@@ -156,6 +158,7 @@ def test_autonomous_decision_stops_for_manual_approval_threshold(tmp_path):
     assert summary.manual_approval_recommended is True
     assert summary.recommended_strategy_pack == "manual_auth_boundary_diff"
     assert summary.recommended_signal_type == "SENSITIVE_DATA"
+    assert summary.hypothesis_stage_counts
     assert summary.exploration_pack in {"", "boundary_cache_auth_investigator"}
     assert "session-compare-run" in summary.manual_approval_command
 
@@ -240,3 +243,73 @@ def test_autonomous_decision_uses_unresolved_hypothesis_when_hotspots_are_weak(t
     assert summary.next_cycle_focus in {"boundary_hotspot_recon", "session_boundary_recon", "api_boundary_recon"}
     assert summary.recommended_signal_type == "BROKEN_ACCESS_CONTROL"
     assert summary.recommended_method_sequence
+    assert summary.retryable_hypothesis_count >= 1
+
+
+def test_autonomous_decision_pivots_when_only_suppressed_families_remain(tmp_path):
+    run_dir = tmp_path / "run-4"
+    parsed_dir = run_dir / "parsed"
+    reports_dir = run_dir / "reports"
+    parsed_dir.mkdir(parents=True)
+    reports_dir.mkdir(parents=True)
+
+    (run_dir / "run.json").write_text(
+        json.dumps(
+            {
+                "target_url": "https://staging.airtable.com",
+                "profile_name": "airtable-staging-public-h1",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (parsed_dir / "signals.json").write_text(
+        json.dumps(
+            {
+                "high_count": 0,
+                "critical_count": 0,
+                "total_signals": 1,
+                "signals": [
+                    {
+                        "signal_type": "INFO_DISCLOSURE",
+                        "endpoint": "https://api-staging.airtable.com/v0/meta/bases",
+                        "priority": "LOW",
+                        "confidence": 0.2,
+                        "status": "ruled_out",
+                        "evidence": {"matched_rule": "weak_header_signal"},
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (parsed_dir / "deep_hunt.json").write_text(
+        json.dumps(
+            {
+                "escalated_count": 0,
+                "signals": [
+                    {
+                        "signal_type": "INFO_DISCLOSURE",
+                        "endpoint": "https://api-staging.airtable.com/v0/meta/bases",
+                        "status": "ruled_out",
+                        "methods_tried": [
+                            "header_policy_review",
+                            "safe_reprobe_get",
+                            "response_shape_review",
+                        ],
+                        "findings": [],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (parsed_dir / "session_compare.json").write_text(json.dumps({"items": []}), encoding="utf-8")
+    (parsed_dir / "review_queue.json").write_text(json.dumps({"start_now_count": 1}), encoding="utf-8")
+    (parsed_dir / "final_report_draft.json").write_text(json.dumps({"candidate_items": 0}), encoding="utf-8")
+
+    summary = AutonomousDecisionEngine(run_dir).build()
+
+    assert summary.decision == "continue_with_surface_expansion"
+    assert summary.stop_reason == "existing_boundary_families_exhausted_expand_to_new_surfaces"
+    assert summary.next_cycle_focus == "developer_surface_recon"
+    assert "https://api-staging.airtable.com/v0" in summary.suppressed_endpoint_families

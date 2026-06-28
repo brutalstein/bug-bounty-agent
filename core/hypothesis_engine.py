@@ -85,6 +85,10 @@ class InvestigationHypothesis:
     evidence_density: int
     manual_approval_candidate: bool
     next_focus: str
+    lifecycle_stage: str
+    next_best_action: str
+    retryable: bool
+    suppression_reasons: list[str]
     suggested_methods: list[str]
     methods_already_tried: list[str]
     supporting_reasons: list[str]
@@ -103,6 +107,8 @@ class HypothesisLedgerSummary:
     hypothesis_count: int
     unresolved_count: int
     high_value_count: int
+    retryable_count: int
+    stage_counts: dict[str, int]
     top_hypothesis_title: str
     top_hypothesis_focus: str
     json_path: str
@@ -296,6 +302,8 @@ class HypothesisLedgerBuilder:
             hypothesis_count=len(hypotheses),
             unresolved_count=sum(1 for item in hypotheses if item.unresolved),
             high_value_count=sum(1 for item in hypotheses if item.reportability_score >= 7),
+            retryable_count=sum(1 for item in hypotheses if item.retryable),
+            stage_counts=self._stage_counts(hypotheses),
             top_hypothesis_title=hypotheses[0].title if hypotheses else "",
             top_hypothesis_focus=hypotheses[0].next_focus if hypotheses else "",
             json_path=str(self.output_json_path),
@@ -415,6 +423,22 @@ class HypothesisLedgerBuilder:
         )
         exhausted = status in {"ruled_out", "escalated"} or (unresolved and not suggested_methods and len(methods_tried) >= 3)
         next_focus = self._derive_focus(payload, suggested_methods)
+        lifecycle_stage, retryable, suppression_reasons = self._classify_lifecycle(
+            status=status,
+            unresolved=unresolved,
+            exhausted=exhausted,
+            manual_approval_candidate=bool(payload["manual_approval_candidate"]),
+            score=score,
+            reportability_score=reportability_score,
+            suggested_methods=suggested_methods,
+            methods_tried=methods_tried,
+            supporting_refs=payload["supporting_refs"],
+        )
+        next_best_action = self._next_best_action(
+            lifecycle_stage=lifecycle_stage,
+            suggested_methods=suggested_methods,
+            next_focus=next_focus,
+        )
 
         supporting_reasons = list(dict.fromkeys(item for item in payload["supporting_reasons"] if item))
         supporting_refs = list(dict.fromkeys(item for item in payload["supporting_refs"] if item))
@@ -438,12 +462,76 @@ class HypothesisLedgerBuilder:
             evidence_density=evidence_density,
             manual_approval_candidate=bool(payload["manual_approval_candidate"]),
             next_focus=next_focus,
+            lifecycle_stage=lifecycle_stage,
+            next_best_action=next_best_action,
+            retryable=retryable,
+            suppression_reasons=suppression_reasons,
             suggested_methods=suggested_methods,
             methods_already_tried=methods_tried,
             supporting_reasons=supporting_reasons[:10],
             sources=sources,
             supporting_refs=supporting_refs[:12],
         )
+
+    def _classify_lifecycle(
+        self,
+        *,
+        status: str,
+        unresolved: bool,
+        exhausted: bool,
+        manual_approval_candidate: bool,
+        score: int,
+        reportability_score: int,
+        suggested_methods: list[str],
+        methods_tried: list[str],
+        supporting_refs: list[str],
+    ) -> tuple[str, bool, list[str]]:
+        refs = {str(item).strip() for item in supporting_refs if str(item).strip()}
+        suppression_reasons: list[str] = []
+
+        if status == "escalated":
+            return "human_review", False, ["escalated_to_human_review"]
+        if "report_section_ready" in refs and reportability_score >= 8:
+            return "report_candidate", False, ["report_section_ready"]
+        if manual_approval_candidate and score >= 10:
+            return "manual_approval_gate", False, ["manual_approval_required"]
+        if exhausted and status == "ruled_out":
+            suppression_reasons.append("ruled_out_by_current_evidence")
+            if len(methods_tried) >= 3:
+                suppression_reasons.append("method_budget_exhausted")
+            if not suggested_methods:
+                suppression_reasons.append("no_safe_method_remaining")
+            return "deprioritized_noise", False, suppression_reasons
+        if unresolved and suggested_methods and score >= 12:
+            return "investigate_next", True, []
+        if unresolved and suggested_methods:
+            return "expand_context", True, []
+        if unresolved:
+            return "watchlist", True, ["collect_more_passive_context"]
+
+        suppression_reasons.append("low_signal_density")
+        if score < 6:
+            suppression_reasons.append("score_below_action_threshold")
+        return "deprioritized_noise", False, suppression_reasons
+
+    def _next_best_action(
+        self,
+        *,
+        lifecycle_stage: str,
+        suggested_methods: list[str],
+        next_focus: str,
+    ) -> str:
+        if lifecycle_stage in {"investigate_next", "expand_context"} and suggested_methods:
+            return suggested_methods[0]
+        if lifecycle_stage == "manual_approval_gate":
+            return "manual_session_boundary_diff"
+        if lifecycle_stage == "report_candidate":
+            return "refresh_report_draft"
+        if lifecycle_stage == "human_review":
+            return "human_review_existing_evidence"
+        if lifecycle_stage == "watchlist":
+            return f"monitor_{next_focus or 'passive_surface_expansion'}"
+        return "deprioritize_and_expand_surface"
 
     def _derive_suggested_methods(self, payload: dict, methods_tried: list[str]) -> list[str]:
         signal_type = str(payload["signal_type"]).upper()
@@ -575,6 +663,8 @@ class HypothesisLedgerBuilder:
         lines.append(f"- **Hypotheses:** `{summary.hypothesis_count}`")
         lines.append(f"- **Unresolved:** `{summary.unresolved_count}`")
         lines.append(f"- **High-Value:** `{summary.high_value_count}`")
+        lines.append(f"- **Retryable:** `{summary.retryable_count}`")
+        lines.append(f"- **Lifecycle Counts:** `{summary.stage_counts}`")
         lines.append(f"- **Top Focus:** `{summary.top_hypothesis_focus}`")
         lines.append("")
         if not summary.hypotheses:
@@ -589,10 +679,14 @@ class HypothesisLedgerBuilder:
             lines.append(f"- **Endpoint:** `{item.get('endpoint')}`")
             lines.append(f"- **Status:** `{item.get('status')}`")
             lines.append(f"- **Unresolved:** `{item.get('unresolved')}`")
+            lines.append(f"- **Lifecycle Stage:** `{item.get('lifecycle_stage')}`")
+            lines.append(f"- **Retryable:** `{item.get('retryable')}`")
             lines.append(f"- **Score:** `{item.get('score')}`")
             lines.append(f"- **Reportability Score:** `{item.get('reportability_score')}`")
             lines.append(f"- **Next Focus:** `{item.get('next_focus')}`")
+            lines.append(f"- **Next Best Action:** `{item.get('next_best_action')}`")
             lines.append(f"- **Suggested Methods:** `{item.get('suggested_methods', [])}`")
+            lines.append(f"- **Suppression Reasons:** `{item.get('suppression_reasons', [])}`")
             lines.append(f"- **Reasons:** `{item.get('supporting_reasons', [])}`")
             lines.append("")
 
@@ -603,6 +697,12 @@ class HypothesisLedgerBuilder:
         lines.append("- Manual approval is still required before any authenticated or higher-risk validation.")
         lines.append("")
         return "\n".join(lines)
+
+    def _stage_counts(self, hypotheses: list[InvestigationHypothesis]) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for item in hypotheses:
+            counts[item.lifecycle_stage] = counts.get(item.lifecycle_stage, 0) + 1
+        return counts
 
     def _read_json(self, path: Path) -> dict:
         if not path.exists():

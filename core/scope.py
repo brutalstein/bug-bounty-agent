@@ -55,6 +55,27 @@ class PolicyConfig:
 
 
 @dataclass(frozen=True)
+class CapabilityConfig:
+    passive_recon: bool
+    high_value_route_discovery: bool
+    endpoint_validation: bool
+    js_analysis: bool
+    browser_readonly_compare: bool
+    authenticated_owned_account_diff: bool
+    api_schema_discovery: bool
+    graphql_introspection_check: bool
+    safe_parameter_reflection_check: bool
+    safe_cache_behavior_check: bool
+    safe_cors_behavior_check: bool
+    safe_redirect_behavior_check: bool
+    safe_idor_candidate_mapping: bool
+    active_scan: bool
+    port_scan: bool
+    state_changing_requests: bool
+    automatic_submission: bool
+
+
+@dataclass(frozen=True)
 class SessionProfileConfig:
     name: str
     kind: str
@@ -100,6 +121,7 @@ class ScopeConfig:
     safety: SafetyRules
     authorization: AuthorizationConfig
     policy: PolicyConfig
+    capabilities: CapabilityConfig
     session_profiles: dict[str, SessionProfileConfig]
     lab: LabConfig | None
 
@@ -238,6 +260,7 @@ class ScopeManager:
             safety = profile.get("safety", {})
             authorization = profile.get("authorization", {})
             policy = profile.get("policy", {})
+            capabilities = profile.get("capabilities", {})
             lab = profile.get("lab", {})
         else:
             target = self.raw_config.get("target_profile", {})
@@ -246,6 +269,7 @@ class ScopeManager:
             safety = self.raw_config.get("safety", {})
             authorization = self.raw_config.get("authorization", {})
             policy = self.raw_config.get("policy", {})
+            capabilities = self.raw_config.get("capabilities", {})
             lab = self.raw_config.get("lab", {})
 
         allowed_methods = policy.get("allowed_http_methods", ["GET", "HEAD", "OPTIONS"])
@@ -326,6 +350,7 @@ class ScopeManager:
                     item for item in policy.get("operator_recipes", []) if isinstance(item, dict)
                 ],
             ),
+            capabilities=self._build_capabilities(capabilities, rules),
             session_profiles=self._build_session_profiles(
                 profile.get("session_profiles", {})
                 if isinstance(profiles, dict) and profiles
@@ -442,6 +467,32 @@ class ScopeManager:
         normalized_method = method.upper().strip()
         return normalized_method in self.config.policy.allowed_http_methods
 
+    def capability_enabled(self, capability: str) -> bool:
+        normalized = str(capability).strip().lower()
+        capability_map = self.capabilities_snapshot()
+        return bool(capability_map.get(normalized, False))
+
+    def capabilities_snapshot(self) -> dict[str, bool]:
+        return {
+            "passive_recon": self.config.capabilities.passive_recon,
+            "high_value_route_discovery": self.config.capabilities.high_value_route_discovery,
+            "endpoint_validation": self.config.capabilities.endpoint_validation,
+            "js_analysis": self.config.capabilities.js_analysis,
+            "browser_readonly_compare": self.config.capabilities.browser_readonly_compare,
+            "authenticated_owned_account_diff": self.config.capabilities.authenticated_owned_account_diff,
+            "api_schema_discovery": self.config.capabilities.api_schema_discovery,
+            "graphql_introspection_check": self.config.capabilities.graphql_introspection_check,
+            "safe_parameter_reflection_check": self.config.capabilities.safe_parameter_reflection_check,
+            "safe_cache_behavior_check": self.config.capabilities.safe_cache_behavior_check,
+            "safe_cors_behavior_check": self.config.capabilities.safe_cors_behavior_check,
+            "safe_redirect_behavior_check": self.config.capabilities.safe_redirect_behavior_check,
+            "safe_idor_candidate_mapping": self.config.capabilities.safe_idor_candidate_mapping,
+            "active_scan": self.config.capabilities.active_scan,
+            "port_scan": self.config.capabilities.port_scan,
+            "state_changing_requests": self.config.capabilities.state_changing_requests,
+            "automatic_submission": self.config.capabilities.automatic_submission,
+        }
+
     def allows_readonly_automation(self) -> bool:
         if self.is_lab_profile():
             return True
@@ -463,6 +514,7 @@ class ScopeManager:
             "interpretation_mode": self.config.policy.interpretation_mode,
             "readonly_automation_allowed": self.allows_readonly_automation(),
             "risky_actions_require_explicit_allow": self.requires_explicit_allow_for_risky_actions(),
+            "enabled_capability_count": sum(1 for enabled in self.capabilities_snapshot().values() if enabled),
         }
 
     def is_authorization_confirmed(self) -> bool:
@@ -554,6 +606,7 @@ class ScopeManager:
             "policy_max_age_days": self.config.policy.policy_max_age_days,
             "policy_status": self.policy_status(),
             "policy_operating_model": self.policy_operating_model(),
+            "capabilities": self.capabilities_snapshot(),
             "method": method.upper(),
             "method_allowed": method_allowed,
             "allowed_http_methods": self.config.policy.allowed_http_methods,
@@ -573,6 +626,7 @@ class ScopeManager:
             "policy_max_age_days": self.config.policy.policy_max_age_days,
             "policy_status": self.policy_status(),
             "policy_operating_model": self.policy_operating_model(),
+            "capabilities": self.capabilities_snapshot(),
             "authorization": {
                 "kind": self.config.authorization.kind,
                 "confirmed": self.config.authorization.confirmed,
@@ -698,6 +752,29 @@ class ScopeManager:
         if str(authorization.get("kind", "")).strip() == "local_lab":
             return True
         return str(target.get("type", "")).strip() == "bug-bounty-program"
+
+    def _build_capabilities(self, capabilities: dict, rules: dict) -> CapabilityConfig:
+        raw = capabilities if isinstance(capabilities, dict) else {}
+        default_passive = True
+        return CapabilityConfig(
+            passive_recon=bool(raw.get("passive_recon", default_passive)),
+            high_value_route_discovery=bool(raw.get("high_value_route_discovery", default_passive)),
+            endpoint_validation=bool(raw.get("endpoint_validation", default_passive)),
+            js_analysis=bool(raw.get("js_analysis", default_passive)),
+            browser_readonly_compare=bool(raw.get("browser_readonly_compare", False)),
+            authenticated_owned_account_diff=bool(raw.get("authenticated_owned_account_diff", False)),
+            api_schema_discovery=bool(raw.get("api_schema_discovery", default_passive)),
+            graphql_introspection_check=bool(raw.get("graphql_introspection_check", default_passive)),
+            safe_parameter_reflection_check=bool(raw.get("safe_parameter_reflection_check", default_passive)),
+            safe_cache_behavior_check=bool(raw.get("safe_cache_behavior_check", default_passive)),
+            safe_cors_behavior_check=bool(raw.get("safe_cors_behavior_check", default_passive)),
+            safe_redirect_behavior_check=bool(raw.get("safe_redirect_behavior_check", default_passive)),
+            safe_idor_candidate_mapping=bool(raw.get("safe_idor_candidate_mapping", default_passive)),
+            active_scan=bool(raw.get("active_scan", bool(rules.get("allow_active_scan", False)))),
+            port_scan=bool(raw.get("port_scan", bool(rules.get("allow_port_scan", False)))),
+            state_changing_requests=bool(raw.get("state_changing_requests", False)),
+            automatic_submission=bool(raw.get("automatic_submission", False)),
+        )
 
 
 if __name__ == "__main__":

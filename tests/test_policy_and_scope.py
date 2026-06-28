@@ -73,6 +73,9 @@ def test_airtable_policy_mode_allows_readonly_automation():
     model = scope.policy_operating_model()
     assert model["interpretation_mode"] == "permissive_readonly_explicit_risky"
     assert model["readonly_automation_allowed"] is True
+    assert scope.capability_enabled("passive_recon") is True
+    assert scope.capability_enabled("api_schema_discovery") is True
+    assert scope.capability_enabled("browser_readonly_compare") is False
 
 
 def test_manual_approval_gate_present():

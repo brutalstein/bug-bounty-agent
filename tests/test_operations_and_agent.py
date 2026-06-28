@@ -52,6 +52,19 @@ def test_authorized_cycle_plans_skip_redundant_report_refresh():
     for plan in plans:
         follow_up_kinds = [item.get("kind") for item in plan.get("follow_ups", [])]
         assert "report_refresh" not in follow_up_kinds
+        if plan["flow_name"] == "surface-recon":
+            settings = plan.get("surface_recon_settings", {})
+            assert settings.get("max_endpoints", 0) >= 25
+            assert settings.get("max_passive_surfaces", 0) >= 8
+
+
+def test_surface_recon_settings_expand_for_airtable_capabilities():
+    scope = ScopeManager("configs/scope.yaml", profile_name="airtable-staging-public-h1")
+    agent = AutonomousAgent(".")
+    settings = agent._surface_recon_settings_for_scope(scope, focus="api")  # noqa: SLF001
+    assert settings["with_browser"] is False
+    assert settings["max_endpoints"] >= 40
+    assert settings["max_passive_surfaces"] >= 13
 
 
 def test_reporting_refresh_writes_state_file(tmp_path):
@@ -153,6 +166,9 @@ def test_decision_driven_plan_carries_strategy_pack(tmp_path):
         "strategy_source": "focus_default",
         "strategy_support_runs": 0,
         "exploration_pack": "",
+        "hypothesis_stage_counts": {"expand_context": 1},
+        "retryable_hypothesis_count": 1,
+        "suppressed_endpoint_families": [],
         "review_queue_start_now": 1,
         "review_queue_manual_review": 2,
         "final_report_items": 0,
@@ -210,6 +226,9 @@ def test_apply_decision_strategy_to_plan_updates_deep_hunt_follow_up():
         strategy_source="focus_default",
         strategy_support_runs=0,
         exploration_pack="",
+        hypothesis_stage_counts={"expand_context": 1},
+        retryable_hypothesis_count=1,
+        suppressed_endpoint_families=[],
         review_queue_start_now=1,
         review_queue_manual_review=2,
         final_report_items=0,
@@ -240,3 +259,64 @@ def test_apply_decision_strategy_to_plan_updates_deep_hunt_follow_up():
         "session_boundary_evidence_review",
         "readonly_variant_matrix_review",
     ]
+
+
+def test_decision_driven_plan_prefers_unsuppressed_targets(tmp_path):
+    scope = ScopeManager("configs/scope.yaml", profile_name="airtable-staging-public-h1")
+    agent = AutonomousAgent(".")
+    run_dir = tmp_path / "run-session"
+    (run_dir / "parsed").mkdir(parents=True)
+    (run_dir / "parsed" / "autonomous_decision.json").write_text(
+        json.dumps(
+            {
+                "recommended_targets": [
+                    "https://api-staging.airtable.com/v0/meta/bases",
+                    "https://staging.airtable.com/developers/web/api/introduction",
+                    "https://api-staging.airtable.com",
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    from core.autonomous_agent import RunEvaluation
+
+    evaluation = RunEvaluation(
+        run_dir=str(run_dir),
+        dashboard_path=str(run_dir / "reports" / "index.md"),
+        flow_name="surface-recon",
+        potential_high_signal=False,
+        stop_reason="existing_boundary_families_exhausted_expand_to_new_surfaces",
+        decision="continue_with_surface_expansion",
+        next_cycle_focus="developer_surface_recon",
+        focus_source="decision_default",
+        focus_support_runs=0,
+        exploration_focus="",
+        highest_priority_target="",
+        boundary_hotspot_count=0,
+        manual_approval_recommended=False,
+        manual_approval_command="",
+        recommended_strategy_pack="developer_surface_expander",
+        recommended_signal_type="INFO_DISCLOSURE",
+        recommended_method_sequence=["js_context_review", "header_policy_review"],
+        strategy_source="focus_default",
+        strategy_support_runs=0,
+        exploration_pack="",
+        hypothesis_stage_counts={"deprioritized_noise": 1},
+        retryable_hypothesis_count=0,
+        suppressed_endpoint_families=["https://api-staging.airtable.com/v0"],
+        review_queue_start_now=1,
+        review_queue_manual_review=1,
+        final_report_items=0,
+        final_report_candidates=0,
+        signals_total=1,
+        signals_high_or_critical=0,
+        deep_hunt_escalated=0,
+        deep_hunt_ruled_out=1,
+        top_signal_types=["INFO_DISCLOSURE"],
+    )
+
+    plan = agent._decision_driven_plan(scope, evaluation, used_targets=[])  # noqa: SLF001
+
+    assert plan is not None
+    assert plan["label"] == "Decision-driven developer-surface recon"
+    assert "https://staging.airtable.com/developers/web/api/introduction" in plan["targets"]

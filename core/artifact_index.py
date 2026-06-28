@@ -267,6 +267,8 @@ class ArtifactIndexBuilder:
         if hypothesis_ledger:
             lines.append(f"- **Hypotheses:** `{hypothesis_ledger.get('hypothesis_count', 0)}`")
             lines.append(f"- **Unresolved Hypotheses:** `{hypothesis_ledger.get('unresolved_count', 0)}`")
+            lines.append(f"- **Retryable Hypotheses:** `{hypothesis_ledger.get('retryable_count', 0)}`")
+            lines.append(f"- **Hypothesis Lifecycle Counts:** `{hypothesis_ledger.get('stage_counts', {})}`")
             lines.append(f"- **Top Hypothesis Focus:** `{hypothesis_ledger.get('top_hypothesis_focus', '')}`")
         if autonomous_decision:
             lines.append(f"- **Autonomous Decision:** `{autonomous_decision.get('decision', '')}`")
@@ -277,6 +279,8 @@ class ArtifactIndexBuilder:
             lines.append(f"- **Boundary Hotspots:** `{autonomous_decision.get('boundary_hotspot_count', 0)}`")
             lines.append(f"- **Autonomous Strategy Pack:** `{autonomous_decision.get('recommended_strategy_pack', '')}`")
             lines.append(f"- **Autonomous Signal Type:** `{autonomous_decision.get('recommended_signal_type', '')}`")
+            lines.append(f"- **Autonomous Retryable Hypotheses:** `{autonomous_decision.get('retryable_hypothesis_count', 0)}`")
+            lines.append(f"- **Autonomous Suppressed Families:** `{autonomous_decision.get('suppressed_endpoint_families', [])}`")
             lines.append(f"- **Autonomous Strategy Source:** `{autonomous_decision.get('strategy_source', '')}`")
             lines.append(f"- **Autonomous Strategy Support Runs:** `{autonomous_decision.get('strategy_support_runs', 0)}`")
             lines.append(f"- **Autonomous Exploration Pack:** `{autonomous_decision.get('exploration_pack', '')}`")

@@ -82,6 +82,9 @@ class RunEvaluation:
     strategy_source: str
     strategy_support_runs: int
     exploration_pack: str
+    hypothesis_stage_counts: dict[str, int]
+    retryable_hypothesis_count: int
+    suppressed_endpoint_families: list[str]
     review_queue_start_now: int
     review_queue_manual_review: int
     final_report_items: int
@@ -456,7 +459,8 @@ class AutonomousAgent:
             candidates.extend(str(url).strip() for url in session_profile.probe_urls if str(url).strip())
 
         candidates.extend(self._allowed_host_roots(scope, selected_target))
-        return self._prioritize_targets(scope, selected_target, candidates)[:8]
+        target_limit = 10 if scope.capability_enabled("high_value_route_discovery") else 8
+        return self._prioritize_targets(scope, selected_target, candidates)[:target_limit]
 
     def build_cycle_plans(
         self,
@@ -466,6 +470,9 @@ class AutonomousAgent:
         max_cycles: int,
     ) -> list[dict[str, Any]]:
         plans: list[dict[str, Any]] = []
+        if not scope.capability_enabled("passive_recon"):
+            return plans
+        surface_target_limit = self._surface_target_limit(scope)
 
         if scope.is_lab_profile():
             plans.append(
@@ -490,8 +497,9 @@ class AutonomousAgent:
                             "surface-recon",
                             "--profile",
                             scope.config.profile_name,
-                            *derived_targets[:3],
+                            *derived_targets[:surface_target_limit],
                         ],
+                        "surface_recon_settings": self._surface_recon_settings_for_scope(scope),
                         "follow_ups": [
                             {
                                 "label": "Signal detection refresh",
@@ -511,6 +519,7 @@ class AutonomousAgent:
                 derived_targets,
                 preferred_keywords=["api", "graphql", "developers", "meta"],
             )
+            surface_targets = (api_mix or derived_targets[:surface_target_limit])[:surface_target_limit]
             plans.append(
                 {
                     "flow_name": "surface-recon",
@@ -519,10 +528,11 @@ class AutonomousAgent:
                         "surface-recon",
                         "--profile",
                         scope.config.profile_name,
-                        *(api_mix or derived_targets[:3]),
+                        *surface_targets,
                     ],
                     "execution": "internal_surface_recon",
-                    "targets": api_mix or derived_targets[:3],
+                    "targets": surface_targets,
+                    "surface_recon_settings": self._surface_recon_settings_for_scope(scope, focus="api"),
                     "follow_ups": [
                         {
                             "label": "Signal detection refresh",
@@ -541,9 +551,10 @@ class AutonomousAgent:
                 preferred_keywords=["login", "auth", "session", "mcp"],
             )
             if not alternate_targets:
-                alternate_targets = [derived_targets[0], *derived_targets[3:5]]
+                alternate_targets = [derived_targets[0], *derived_targets[3:6]]
             alternate_targets = list(dict.fromkeys(alternate_targets))
             if len(alternate_targets) >= 2:
+                session_targets = alternate_targets[:surface_target_limit]
                 plans.append(
                     {
                         "flow_name": "surface-recon",
@@ -552,10 +563,11 @@ class AutonomousAgent:
                             "surface-recon",
                             "--profile",
                             scope.config.profile_name,
-                            *alternate_targets[:3],
+                            *session_targets,
                         ],
                         "execution": "internal_surface_recon",
-                        "targets": alternate_targets[:3],
+                        "targets": session_targets,
+                        "surface_recon_settings": self._surface_recon_settings_for_scope(scope, focus="session"),
                         "follow_ups": [
                             {
                                 "label": "Signal detection refresh",
@@ -569,12 +581,13 @@ class AutonomousAgent:
                     }
                 )
 
-        if len(derived_targets) >= 3:
+        if scope.capability_enabled("api_schema_discovery") and len(derived_targets) >= 3:
             docs_targets = self._select_target_mix(
                 derived_targets,
                 preferred_keywords=["developers", "swagger", "openapi", "graphql", "manifest", "config"],
             )
             if len(docs_targets) >= 2:
+                developer_targets = docs_targets[:surface_target_limit]
                 plans.append(
                     {
                         "flow_name": "surface-recon",
@@ -583,10 +596,11 @@ class AutonomousAgent:
                             "surface-recon",
                             "--profile",
                             scope.config.profile_name,
-                            *docs_targets[:3],
+                            *developer_targets,
                         ],
                         "execution": "internal_surface_recon",
-                        "targets": docs_targets[:3],
+                        "targets": developer_targets,
+                        "surface_recon_settings": self._surface_recon_settings_for_scope(scope, focus="developer"),
                         "follow_ups": [
                             {
                                 "label": "Signal detection refresh",
@@ -667,6 +681,9 @@ class AutonomousAgent:
             strategy_source=decision_summary.strategy_source,
             strategy_support_runs=decision_summary.strategy_support_runs,
             exploration_pack=decision_summary.exploration_pack,
+            hypothesis_stage_counts=dict(decision_summary.hypothesis_stage_counts),
+            retryable_hypothesis_count=decision_summary.retryable_hypothesis_count,
+            suppressed_endpoint_families=list(decision_summary.suppressed_endpoint_families),
             review_queue_start_now=review_queue_start_now,
             review_queue_manual_review=int(review_queue.get("manual_review_count", 0)),
             final_report_items=int(final_report.get("report_draft_items", 0)),
@@ -734,6 +751,9 @@ class AutonomousAgent:
             lines.append(f"- **Strategy Source:** `{evaluation.strategy_source}`")
             lines.append(f"- **Strategy Support Runs:** `{evaluation.strategy_support_runs}`")
             lines.append(f"- **Exploration Pack:** `{evaluation.exploration_pack}`")
+            lines.append(f"- **Hypothesis Stage Counts:** `{evaluation.hypothesis_stage_counts}`")
+            lines.append(f"- **Retryable Hypotheses:** `{evaluation.retryable_hypothesis_count}`")
+            lines.append(f"- **Suppressed Endpoint Families:** `{evaluation.suppressed_endpoint_families}`")
             lines.append(f"- **Review Queue Start Now:** `{evaluation.review_queue_start_now}`")
             lines.append(f"- **Manual Review Items:** `{evaluation.review_queue_manual_review}`")
             lines.append(f"- **Final Report Candidates:** `{evaluation.final_report_candidates}`")
@@ -860,12 +880,23 @@ class AutonomousAgent:
         evaluation: RunEvaluation,
         used_targets: list[str],
     ) -> dict[str, Any] | None:
-        if evaluation.next_cycle_focus != "boundary_hotspot_recon":
+        focus = str(evaluation.next_cycle_focus).strip()
+        focus_to_label = {
+            "boundary_hotspot_recon": "Decision-driven boundary hotspot recon",
+            "session_boundary_recon": "Decision-driven session-boundary recon",
+            "api_boundary_recon": "Decision-driven API-boundary recon",
+            "developer_surface_recon": "Decision-driven developer-surface recon",
+        }
+        if focus not in focus_to_label:
             return None
-        if evaluation.boundary_hotspot_count <= 0:
+        if focus == "boundary_hotspot_recon" and evaluation.boundary_hotspot_count <= 0:
             return None
 
-        candidate_targets = self._decision_targets_from_run(Path(evaluation.run_dir), scope)
+        candidate_targets = self._decision_targets_from_run(
+            Path(evaluation.run_dir),
+            scope,
+            suppressed_endpoint_families=evaluation.suppressed_endpoint_families,
+        )
         filtered_targets: list[str] = []
         for target in candidate_targets:
             normalized = str(target).strip()
@@ -884,7 +915,7 @@ class AutonomousAgent:
 
         return {
             "flow_name": "surface-recon",
-            "label": "Decision-driven boundary hotspot recon",
+            "label": focus_to_label[focus],
             "argv": [
                 "surface-recon",
                 "--profile",
@@ -893,6 +924,10 @@ class AutonomousAgent:
             ],
             "execution": "internal_surface_recon",
             "targets": filtered_targets,
+            "surface_recon_settings": self._surface_recon_settings_for_scope(
+                scope,
+                focus=self._surface_focus_for_decision_focus(focus),
+            ),
             "follow_ups": [
                 {"label": "Signal detection refresh", "kind": "signals"},
                 {
@@ -905,12 +940,30 @@ class AutonomousAgent:
             ],
         }
 
-    def _decision_targets_from_run(self, run_dir: Path, scope: ScopeManager) -> list[str]:
+    def _decision_targets_from_run(
+        self,
+        run_dir: Path,
+        scope: ScopeManager,
+        *,
+        suppressed_endpoint_families: list[str] | None = None,
+    ) -> list[str]:
         decision = self._read_json(run_dir / "parsed" / "autonomous_decision.json")
         targets = decision.get("recommended_targets", []) if isinstance(decision, dict) else []
         if not isinstance(targets, list):
             return []
-        return [str(item).strip() for item in targets if str(item).strip() and scope.is_target_allowed(str(item).strip())]
+        suppressed = {str(item).strip() for item in (suppressed_endpoint_families or []) if str(item).strip()}
+        preferred: list[str] = []
+        fallback: list[str] = []
+        for item in targets:
+            normalized = str(item).strip()
+            if not normalized or not scope.is_target_allowed(normalized):
+                continue
+            family = self._endpoint_family(normalized)
+            if family and family in suppressed:
+                fallback.append(normalized)
+                continue
+            preferred.append(normalized)
+        return [item for item in dict.fromkeys(preferred + fallback) if item]
 
     def _apply_decision_strategy_to_plan(
         self,
@@ -975,19 +1028,24 @@ class AutonomousAgent:
         profile_name = self._extract_profile_name(plan.get("argv", []))
         if not profile_name or len(targets) < 2:
             return False
+        settings = (
+            plan.get("surface_recon_settings", {})
+            if isinstance(plan.get("surface_recon_settings", {}), dict)
+            else {}
+        )
         try:
             result = run_surface_recon_internal(
                 profile_name=profile_name,
                 targets=targets,
-                with_browser=False,
+                with_browser=bool(settings.get("with_browser", False)),
                 manual_approval=False,
-                max_endpoints=25,
-                max_passive_surfaces=8,
-                max_start_now=10,
-                max_manual_review=20,
-                max_review_later=20,
-                max_recon_backlog=20,
-                max_noise=20,
+                max_endpoints=int(settings.get("max_endpoints", 25)),
+                max_passive_surfaces=int(settings.get("max_passive_surfaces", 8)),
+                max_start_now=int(settings.get("max_start_now", 10)),
+                max_manual_review=int(settings.get("max_manual_review", 20)),
+                max_review_later=int(settings.get("max_review_later", 20)),
+                max_recon_backlog=int(settings.get("max_recon_backlog", 20)),
+                max_noise=int(settings.get("max_noise", 20)),
             )
             if result != 0:
                 raise RuntimeError(f"internal surface recon returned {result}")
@@ -1046,6 +1104,8 @@ class AutonomousAgent:
         print_status("review", f"Allowed methods: {scope.config.policy.allowed_http_methods}")
         print_status("review", f"Rate limit: {scope.config.rules.max_requests_per_minute} requests/minute")
         print_status("review", f"Policy restrictions: {scope.config.policy.disallowed_actions}")
+        enabled_capabilities = [name for name, enabled in scope.capabilities_snapshot().items() if enabled]
+        print_status("review", f"Enabled capabilities: {enabled_capabilities}")
         print_status(
             "review",
             "Planned phases: PREFLIGHT -> POLICY_VERIFY -> TARGET_DERIVE -> PASSIVE_RECON -> SIGNAL_DETECT -> SAFE_DEEP_HUNT -> EVIDENCE_PACK -> REVIEW_QUEUE -> REPORT_DRAFT -> DASHBOARD -> STOP",
@@ -1058,6 +1118,63 @@ class AutonomousAgent:
         print_status("artifact", f"Primary target: {selected_target}")
         if derived_targets:
             print_status("artifact", f"Initial derived targets: {derived_targets[:3]}")
+
+    def _surface_recon_settings_for_scope(self, scope: ScopeManager, focus: str = "default") -> dict[str, Any]:
+        max_endpoints = 25
+        max_passive_surfaces = 8
+
+        if scope.capability_enabled("high_value_route_discovery"):
+            max_endpoints += 8
+        if scope.capability_enabled("api_schema_discovery") or scope.capability_enabled("graphql_introspection_check"):
+            max_endpoints += 6
+        if scope.capability_enabled("safe_idor_candidate_mapping"):
+            max_endpoints += 6
+        if scope.capability_enabled("safe_cache_behavior_check"):
+            max_passive_surfaces += 3
+        if scope.capability_enabled("safe_cors_behavior_check") or scope.capability_enabled("safe_redirect_behavior_check"):
+            max_passive_surfaces += 2
+        if focus == "developer":
+            max_endpoints += 4
+        elif focus in {"boundary", "session"}:
+            max_passive_surfaces += 2
+
+        return {
+            "with_browser": bool(
+                scope.capability_enabled("browser_readonly_compare")
+                and scope.config.rules.allow_browser_crawl
+                and not scope.requires_manual_approval("browser_screenshots")
+            ),
+            "max_endpoints": min(max_endpoints, 48),
+            "max_passive_surfaces": min(max_passive_surfaces, 16),
+            "max_start_now": 12,
+            "max_manual_review": 24,
+            "max_review_later": 24,
+            "max_recon_backlog": 24,
+            "max_noise": 24,
+        }
+
+    def _surface_target_limit(self, scope: ScopeManager) -> int:
+        if scope.capability_enabled("api_schema_discovery") or scope.capability_enabled("high_value_route_discovery"):
+            return 4
+        return 3
+
+    def _surface_focus_for_decision_focus(self, focus: str) -> str:
+        mapping = {
+            "boundary_hotspot_recon": "boundary",
+            "session_boundary_recon": "session",
+            "api_boundary_recon": "api",
+            "developer_surface_recon": "developer",
+        }
+        return mapping.get(str(focus).strip(), "default")
+
+    def _endpoint_family(self, endpoint: str) -> str:
+        parsed = urlparse(endpoint)
+        if not parsed.scheme or not parsed.netloc:
+            return ""
+        parts = [item for item in parsed.path.split("/") if item]
+        if not parts:
+            return f"{parsed.scheme}://{parsed.netloc}/"
+        return f"{parsed.scheme}://{parsed.netloc}/{parts[0]}"
 
     def _record_state(
         self,
@@ -1114,6 +1231,10 @@ class AutonomousAgent:
         print_status("info", f"Strategy support runs: {evaluation.strategy_support_runs}")
         if evaluation.exploration_pack:
             print_status("info", f"Exploration pack: {evaluation.exploration_pack}")
+        print_status("info", f"Hypothesis stages: {evaluation.hypothesis_stage_counts}")
+        print_status("info", f"Retryable hypotheses: {evaluation.retryable_hypothesis_count}")
+        if evaluation.suppressed_endpoint_families:
+            print_status("warn", f"Suppressed families: {evaluation.suppressed_endpoint_families}")
         if evaluation.recommended_signal_type:
             print_status("info", f"Recommended signal type: {evaluation.recommended_signal_type}")
         if evaluation.manual_approval_recommended:

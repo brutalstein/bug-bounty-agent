@@ -85,6 +85,25 @@ profiles:
       focus_areas: []
       operator_recipes: []
 
+    capabilities:
+      passive_recon: true
+      high_value_route_discovery: true
+      endpoint_validation: true
+      js_analysis: true
+      browser_readonly_compare: true
+      authenticated_owned_account_diff: true
+      api_schema_discovery: true
+      graphql_introspection_check: true
+      safe_parameter_reflection_check: true
+      safe_cache_behavior_check: true
+      safe_cors_behavior_check: true
+      safe_redirect_behavior_check: true
+      safe_idor_candidate_mapping: true
+      active_scan: true
+      port_scan: false
+      state_changing_requests: false
+      automatic_submission: false
+
     session_profiles:
       juice-shop-customer:
         kind: "juice_shop_jwt"
@@ -312,6 +331,25 @@ profiles:
           notes:
             - "Use endpointUrl https://api-staging.airtable.com for later API-focused work."
             - "Avoid touching production data or any state-changing workflows."
+
+    capabilities:
+      passive_recon: true
+      high_value_route_discovery: true
+      endpoint_validation: true
+      js_analysis: true
+      browser_readonly_compare: false
+      authenticated_owned_account_diff: false
+      api_schema_discovery: true
+      graphql_introspection_check: true
+      safe_parameter_reflection_check: true
+      safe_cache_behavior_check: true
+      safe_cors_behavior_check: true
+      safe_redirect_behavior_check: true
+      safe_idor_candidate_mapping: true
+      active_scan: false
+      port_scan: false
+      state_changing_requests: false
+      automatic_submission: false
 
     session_profiles:
       airtable-staging-api-key:

@@ -101,8 +101,13 @@ def test_hypothesis_ledger_prioritizes_unresolved_boundary_signal(tmp_path):
     assert top["signal_type"] == "BROKEN_ACCESS_CONTROL"
     assert top["unresolved"] is True
     assert top["next_focus"] == "boundary_hotspot_recon"
+    assert top["lifecycle_stage"] in {"investigate_next", "expand_context"}
+    assert top["retryable"] is True
+    assert top["next_best_action"]
     assert "cache_auth_boundary_investigator" in top["suggested_methods"]
     assert "session_boundary_evidence_review" not in top["suggested_methods"]
+    assert summary.retryable_count >= 1
+    assert summary.stage_counts.get(top["lifecycle_stage"], 0) >= 1
 
 
 def test_hypothesis_ledger_marks_escalated_signal_exhausted(tmp_path):
@@ -168,3 +173,5 @@ def test_hypothesis_ledger_marks_escalated_signal_exhausted(tmp_path):
     assert top["status"] == "escalated"
     assert top["exhausted"] is True
     assert top["unresolved"] is False
+    assert top["lifecycle_stage"] == "human_review"
+    assert top["retryable"] is False

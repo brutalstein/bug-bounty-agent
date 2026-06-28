@@ -149,12 +149,39 @@ class ProfileReadinessAssessor:
                 )
             )
 
+        if not self.scope.capability_enabled("passive_recon"):
+            blockers.append(
+                ReadinessIssue(
+                    severity="blocker",
+                    code="passive_recon_disabled",
+                    message="Passive recon capability is disabled, so the default autonomous operator cannot proceed.",
+                )
+            )
+
+        if self.scope.capability_enabled("automatic_submission"):
+            blockers.append(
+                ReadinessIssue(
+                    severity="blocker",
+                    code="automatic_submission_enabled",
+                    message="Automatic submission must stay disabled for this repository.",
+                )
+            )
+
         if config.rules.allow_browser_crawl and self.scope.requires_manual_approval("browser_screenshots"):
             warnings.append(
                 ReadinessIssue(
                     severity="warning",
                     code="browser_crawl_manual_review",
                     message="Browser crawl is enabled, but the policy marks browser-based actions as manual-approval areas.",
+                )
+            )
+
+        if self.scope.capability_enabled("browser_readonly_compare") and self.scope.requires_manual_approval("browser_screenshots"):
+            warnings.append(
+                ReadinessIssue(
+                    severity="warning",
+                    code="browser_capability_waiting_manual_approval",
+                    message="Browser read-only comparison is configured, but policy still requires explicit manual approval before it can auto-run.",
                 )
             )
 

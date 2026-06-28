@@ -49,6 +49,9 @@ class AutonomousDecisionSummary:
     exploration_pack: str
     recommended_targets: list[str]
     strongest_hotspots: list[dict]
+    hypothesis_stage_counts: dict[str, int]
+    retryable_hypothesis_count: int
+    suppressed_endpoint_families: list[str]
     rationale: list[str]
     intelligence_warnings: list[str]
     intelligence_errors: list[str]
@@ -98,9 +101,17 @@ class AutonomousDecisionEngine:
         unresolved_hypotheses = [
             item
             for item in hypothesis_ledger.get("hypotheses", [])
-            if isinstance(item, dict) and item.get("unresolved") is True and item.get("exhausted") is not True
+            if isinstance(item, dict)
+            and item.get("unresolved") is True
+            and item.get("exhausted") is not True
+            and item.get("retryable") is True
+            and str(item.get("lifecycle_stage", "")).strip()
+            in {"investigate_next", "expand_context", "watchlist"}
         ]
         top_hypothesis = unresolved_hypotheses[0] if unresolved_hypotheses else None
+        hypothesis_stage_counts = self._hypothesis_stage_counts(hypothesis_ledger)
+        retryable_hypothesis_count = len(unresolved_hypotheses)
+        suppressed_endpoint_families = self._suppressed_endpoint_families(hypothesis_ledger)
         next_cycle_focus = "continue_passive_surface_expansion"
         focus_source = "decision_default"
         focus_support_runs = 0
@@ -122,6 +133,10 @@ class AutonomousDecisionEngine:
         strongest_hotspot = hotspots[0] if hotspots else None
         strongest_score = strongest_hotspot.score if strongest_hotspot else 0
         top_signal_type = self._top_signal_type(signals)
+        recommended_targets = self._filter_targets_by_suppressed_families(
+            recommended_targets,
+            suppressed_endpoint_families,
+        )
 
         if deep_hunt_escalated > 0 and hotspots:
             decision = "stop_for_human_review"
@@ -189,8 +204,19 @@ class AutonomousDecisionEngine:
                 if str(item).strip()
             ]
             recommended_targets = [str(top_hypothesis.get("endpoint", "")).strip()] + recommended_targets
-            recommended_targets = [item for item in dict.fromkeys(recommended_targets) if item]
+            recommended_targets = self._filter_targets_by_suppressed_families(
+                [item for item in dict.fromkeys(recommended_targets) if item],
+                suppressed_endpoint_families,
+            )
             rationale.append("Unresolved read-only hypotheses remain even though hotspot thresholds were not crossed.")
+        elif suppressed_endpoint_families and review_queue_start_now > 0:
+            decision = "continue_with_surface_expansion"
+            stop_reason = "existing_boundary_families_exhausted_expand_to_new_surfaces"
+            should_stop = False
+            next_cycle_focus = "developer_surface_recon" if "JWT_ISSUES" not in {top_signal_type} else "api_boundary_recon"
+            recommended_strategy_pack = self._strategy_pack_for_focus(next_cycle_focus)
+            recommended_signal_type = top_signal_type or "INFO_DISCLOSURE"
+            rationale.append("Existing boundary families look exhausted, so the next cycle should pivot toward fresher passive surfaces.")
         elif review_queue_start_now > 0:
             decision = "continue_with_surface_expansion"
             stop_reason = "review_queue_contains_start_now_items_but_needs_more_signal"
@@ -288,6 +314,9 @@ class AutonomousDecisionEngine:
             exploration_pack=exploration_pack,
             recommended_targets=recommended_targets,
             strongest_hotspots=[item.to_dict() for item in hotspots[:5]],
+            hypothesis_stage_counts=hypothesis_stage_counts,
+            retryable_hypothesis_count=retryable_hypothesis_count,
+            suppressed_endpoint_families=suppressed_endpoint_families,
             rationale=rationale,
             intelligence_warnings=intelligence_warnings,
             intelligence_errors=intelligence_errors,
@@ -636,6 +665,52 @@ class AutonomousDecisionEngine:
                     return targets
         return targets
 
+    def _hypothesis_stage_counts(self, hypothesis_ledger: dict) -> dict[str, int]:
+        counts = hypothesis_ledger.get("stage_counts", []) if isinstance(hypothesis_ledger, dict) else {}
+        return counts if isinstance(counts, dict) else {}
+
+    def _suppressed_endpoint_families(self, hypothesis_ledger: dict) -> list[str]:
+        hypotheses = hypothesis_ledger.get("hypotheses", []) if isinstance(hypothesis_ledger, dict) else []
+        families: list[str] = []
+        for item in hypotheses:
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("lifecycle_stage", "")).strip() != "deprioritized_noise":
+                continue
+            family = str(item.get("endpoint_family", "")).strip()
+            if family and family not in families:
+                families.append(family)
+        return families
+
+    def _filter_targets_by_suppressed_families(
+        self,
+        targets: list[str],
+        suppressed_endpoint_families: list[str],
+    ) -> list[str]:
+        if not suppressed_endpoint_families:
+            return [item for item in dict.fromkeys(targets) if item]
+        filtered: list[str] = []
+        seen: set[str] = set()
+        for target in targets:
+            normalized = str(target).strip()
+            if not normalized or normalized in seen:
+                continue
+            if self._endpoint_family(normalized) in suppressed_endpoint_families:
+                continue
+            seen.add(normalized)
+            filtered.append(normalized)
+        fallback = [item for item in dict.fromkeys(targets) if item]
+        return filtered or fallback
+
+    def _endpoint_family(self, endpoint: str) -> str:
+        parsed = urlparse(endpoint)
+        if not parsed.scheme or not parsed.netloc:
+            return ""
+        parts = [item for item in parsed.path.split("/") if item]
+        if not parts:
+            return f"{parsed.scheme}://{parsed.netloc}/"
+        return f"{parsed.scheme}://{parsed.netloc}/{parts[0]}"
+
     def _candidate_targets_from_endpoint(self, endpoint: str) -> list[str]:
         parsed = urlparse(endpoint)
         if not parsed.scheme or not parsed.netloc:
@@ -686,6 +761,9 @@ class AutonomousDecisionEngine:
         lines.append(f"- **Highest Priority Target:** `{summary.highest_priority_target}`")
         lines.append(f"- **Boundary Hotspots:** `{summary.boundary_hotspot_count}`")
         lines.append(f"- **Recommended Targets:** `{summary.recommended_targets}`")
+        lines.append(f"- **Hypothesis Stage Counts:** `{summary.hypothesis_stage_counts}`")
+        lines.append(f"- **Retryable Hypotheses:** `{summary.retryable_hypothesis_count}`")
+        lines.append(f"- **Suppressed Endpoint Families:** `{summary.suppressed_endpoint_families}`")
         if summary.manual_approval_recommended:
             lines.append(f"- **Manual Approval Recommended:** `{summary.manual_approval_recommended}`")
             lines.append(f"- **Why:** `{summary.manual_approval_reason}`")
