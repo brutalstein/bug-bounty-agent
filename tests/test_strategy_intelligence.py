@@ -220,6 +220,8 @@ def test_strategy_intelligence_prefers_more_efficient_pack(tmp_path):
     summary = StrategyIntelligenceAnalyzer(current_run).build()
 
     assert summary.recommended_packs["api_boundary_recon"] == "api_surface_correlator"
+    best = next(item for item in summary.pack_scores if item["strategy_pack"] == "api_surface_correlator")
+    assert best["weighted_efficiency_score"] >= best["efficiency_score"]
 
 
 def test_strategy_intelligence_emits_exploration_pack_on_repeated_low_value_runs(tmp_path):
@@ -367,6 +369,49 @@ def test_strategy_intelligence_recommends_focus_by_efficiency(tmp_path):
     )
 
     summary = StrategyIntelligenceAnalyzer(current_run).build()
+
+    assert summary.recommended_focuses["passive_surface_expansion"] == "api_boundary_recon"
+
+
+def test_strategy_intelligence_time_decay_prefers_newer_pattern(tmp_path):
+    _write_run(
+        tmp_path,
+        "run-old-strong-1",
+        profile="airtable-staging-public-h1",
+        focus="developer_surface_recon",
+        pack="developer_surface_expander",
+        signals_with_findings=3,
+        total_requests=18,
+    )
+    _write_run(
+        tmp_path,
+        "run-old-strong-2",
+        profile="airtable-staging-public-h1",
+        focus="developer_surface_recon",
+        pack="developer_surface_expander",
+        signals_with_findings=3,
+        total_requests=18,
+    )
+    _write_run(
+        tmp_path,
+        "run-newer-fast-1",
+        profile="airtable-staging-public-h1",
+        focus="api_boundary_recon",
+        pack="api_surface_correlator",
+        signals_with_findings=2,
+        total_requests=6,
+        boundary_hotspot_count=0,
+    )
+    current_run = _write_run(
+        tmp_path,
+        "run-current-decay",
+        profile="airtable-staging-public-h1",
+        focus="session_boundary_recon",
+        pack="session_boundary_mapper",
+        signals_with_findings=0,
+    )
+
+    summary = StrategyIntelligenceAnalyzer(current_run, decay_half_life_runs=1.0).build()
 
     assert summary.recommended_focuses["passive_surface_expansion"] == "api_boundary_recon"
 
