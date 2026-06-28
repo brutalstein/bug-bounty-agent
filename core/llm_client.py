@@ -218,20 +218,58 @@ def current_llm_backend(task: str = "analysis") -> str:
     return "fallback"
 
 
-def analyze_signal(signal_json: dict, available_methods: list[str] | None = None) -> LLMResponse:
-    compact_signal = _compact_signal(signal_json, available_methods=available_methods)
-    fallback_payload = _fallback_signal_analysis(signal_json, available_methods=available_methods)
-    prompt = (
-        f"{ANALYSIS_SYSTEM_PROMPT}\n"
-        "Return JSON only with keys: confidence, vuln_class, next_step, report_ready, rationale.\n"
-        f"{json.dumps(compact_signal, ensure_ascii=False)}"
+def analyze_signal(
+    signal_json: dict,
+    available_methods: list[str] | None = None,
+    *,
+    analysis_mode: str = "triage",
+) -> LLMResponse:
+    normalized_mode = str(analysis_mode or "triage").strip().lower()
+    task = _analysis_task_for_mode(normalized_mode)
+    compact_signal = _compact_signal(
+        signal_json,
+        available_methods=available_methods,
+        analysis_mode=normalized_mode,
     )
+    fallback_payload = _fallback_signal_analysis(
+        signal_json,
+        available_methods=available_methods,
+        analysis_mode=normalized_mode,
+    )
+    if normalized_mode == "investigation_synthesis":
+        prompt = (
+            f"{ANALYSIS_SYSTEM_PROMPT}\n"
+            "Return JSON only with keys: confidence, vuln_class, next_step, report_ready, rationale, "
+            "strongest_evidence, missing_evidence, contradiction_flags, exploitability_summary, recommended_focus.\n"
+            "Synthesize the strongest reader-facing conclusion from the redacted evidence and call out blockers.\n"
+            f"{json.dumps(compact_signal, ensure_ascii=False)}"
+        )
+    elif normalized_mode == "investigation_verification":
+        prompt = (
+            f"{ANALYSIS_SYSTEM_PROMPT}\n"
+            "Return JSON only with keys: confidence, vuln_class, next_step, report_ready, rationale, "
+            "evidence_alignment_score, confidence_delta, unsupported_claims, reasoning_risks, "
+            "verified_observations, reviewer_disposition.\n"
+            "Audit the prior synthesis against the redacted evidence. Penalize over-claims, reward strong evidence alignment, "
+            "and prefer lowering confidence over guessing.\n"
+            f"{json.dumps(compact_signal, ensure_ascii=False)}"
+        )
+    else:
+        prompt = (
+            f"{ANALYSIS_SYSTEM_PROMPT}\n"
+            "Return JSON only with keys: confidence, vuln_class, next_step, report_ready, rationale.\n"
+            f"{json.dumps(compact_signal, ensure_ascii=False)}"
+        )
     return _run_json_task(
-        task="signal_analysis",
+        task=task,
         prompt=prompt,
         payload=compact_signal,
         fallback_payload=fallback_payload,
-        normalizer=lambda data: _normalize_signal_analysis_response(data, compact_signal),
+        normalizer=lambda data: _normalize_signal_analysis_response(
+            data,
+            compact_signal,
+            normalized_mode,
+        ),
     )
 
 
@@ -418,9 +456,7 @@ def _call_openai(prompt: str, task: str, model_name: str) -> str | None:
     if not is_openai_available():
         return None
 
-    reasoning_effort = "low"
-    if effective_llm_profile() == "quality" or task == "report_section":
-        reasoning_effort = "medium"
+    reasoning_effort = _openai_reasoning_effort(task)
     body = json.dumps(
         {
             "model": model_name,
@@ -575,18 +611,41 @@ def _ollama_task_options(task: str) -> dict[str, float | int]:
     presets = {
         "speed": {
             "signal_analysis": {"temperature": 0.0, "num_predict": 140},
+            "signal_synthesis": {"temperature": 0.0, "num_predict": 220},
+            "signal_verification": {"temperature": 0.0, "num_predict": 220},
             "report_section": {"temperature": 0.1, "num_predict": 260},
         },
         "balanced": {
             "signal_analysis": {"temperature": 0.0, "num_predict": 220},
+            "signal_synthesis": {"temperature": 0.0, "num_predict": 320},
+            "signal_verification": {"temperature": 0.0, "num_predict": 360},
             "report_section": {"temperature": 0.15, "num_predict": 420},
         },
         "quality": {
             "signal_analysis": {"temperature": 0.0, "num_predict": 320},
+            "signal_synthesis": {"temperature": 0.0, "num_predict": 520},
+            "signal_verification": {"temperature": 0.0, "num_predict": 620},
             "report_section": {"temperature": 0.2, "num_predict": 620},
         },
     }
     return dict(presets[profile].get(task, presets[profile]["signal_analysis"]))
+
+
+def _analysis_task_for_mode(analysis_mode: str) -> str:
+    if analysis_mode == "investigation_synthesis":
+        return "signal_synthesis"
+    if analysis_mode == "investigation_verification":
+        return "signal_verification"
+    return "signal_analysis"
+
+
+def _openai_reasoning_effort(task: str) -> str:
+    profile = effective_llm_profile()
+    if task == "signal_verification":
+        return "high" if profile == "quality" else "medium"
+    if task in {"report_section", "signal_synthesis"}:
+        return "high" if profile == "quality" else "medium"
+    return "medium" if profile == "quality" else "low"
 
 
 def _parse_json_response(text: str) -> dict | None:
@@ -743,8 +802,15 @@ def _write_trace(
         file.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
-def _compact_signal(signal_json: dict, available_methods: list[str] | None = None) -> dict:
+def _compact_signal(
+    signal_json: dict,
+    available_methods: list[str] | None = None,
+    *,
+    analysis_mode: str = "triage",
+) -> dict:
+    max_findings = 6 if analysis_mode in {"investigation_synthesis", "investigation_verification"} else 4
     payload = {
+        "analysis_mode": analysis_mode,
         "signal_type": signal_json.get("signal_type"),
         "endpoint": _sanitize_for_llm(signal_json.get("endpoint")),
         "priority": signal_json.get("priority"),
@@ -752,19 +818,25 @@ def _compact_signal(signal_json: dict, available_methods: list[str] | None = Non
         "status": signal_json.get("status"),
         "methods_tried": _sanitize_for_llm(signal_json.get("methods_tried", []))[:6],
         "evidence": _sanitize_for_llm(signal_json.get("evidence", {})),
-        "findings": _compact_evidence(signal_json.get("findings", [])),
+        "findings": _compact_evidence(signal_json.get("findings", []), limit=max_findings),
     }
+    if analysis_mode in {"investigation_synthesis", "investigation_verification"}:
+        payload["llm_notes"] = _compact_evidence(signal_json.get("llm_notes", []), limit=3)
+        payload["active_hypothesis_focus"] = _sanitize_for_llm(signal_json.get("active_hypothesis_focus"))
+        payload["active_hypothesis_methods"] = _sanitize_for_llm(signal_json.get("active_hypothesis_methods", []))
+    if analysis_mode == "investigation_verification":
+        payload["investigation_summary"] = _sanitize_for_llm(signal_json.get("investigation_summary", {}))
     if available_methods:
         payload["available_methods"] = [str(item) for item in available_methods[:6]]
     return payload
 
 
-def _compact_evidence(evidence: list | None) -> list[dict]:
+def _compact_evidence(evidence: list | None, *, limit: int = 4) -> list[dict]:
     compact: list[dict] = []
     if not isinstance(evidence, list):
         return compact
 
-    for item in evidence[:4]:
+    for item in evidence[:limit]:
         if not isinstance(item, dict):
             continue
         compact.append(_sanitize_for_llm(item))
@@ -796,7 +868,11 @@ def _sanitize_for_llm(value, depth: int = 0):
     return value
 
 
-def _normalize_signal_analysis_response(data: dict, compact_signal: dict) -> dict | None:
+def _normalize_signal_analysis_response(
+    data: dict,
+    compact_signal: dict,
+    analysis_mode: str,
+) -> dict | None:
     if not isinstance(data, dict):
         return None
 
@@ -808,7 +884,7 @@ def _normalize_signal_analysis_response(data: dict, compact_signal: dict) -> dic
     if not next_step:
         next_step = "stop"
 
-    return {
+    normalized = {
         "confidence": _normalize_confidence_to_ten(data.get("confidence")),
         "vuln_class": str(data.get("vuln_class") or compact_signal.get("signal_type") or "UNKNOWN").strip()[:80],
         "next_step": next_step,
@@ -816,6 +892,22 @@ def _normalize_signal_analysis_response(data: dict, compact_signal: dict) -> dic
         "rationale": str(data.get("rationale", "")).strip()[:280]
         or "LLM selected a conservative next step from the redacted evidence snapshot.",
     }
+    if analysis_mode == "investigation_synthesis":
+        normalized["strongest_evidence"] = _normalize_text_list(data.get("strongest_evidence"), limit=4, max_length=180)
+        normalized["missing_evidence"] = _normalize_text_list(data.get("missing_evidence"), limit=4, max_length=180)
+        normalized["contradiction_flags"] = _normalize_text_list(data.get("contradiction_flags"), limit=4, max_length=160)
+        normalized["exploitability_summary"] = str(data.get("exploitability_summary", "")).strip()[:320]
+        normalized["recommended_focus"] = str(data.get("recommended_focus", "")).strip()[:120]
+        normalized["reasoning_depth"] = "investigation_synthesis"
+    elif analysis_mode == "investigation_verification":
+        normalized["evidence_alignment_score"] = _normalize_score_01(data.get("evidence_alignment_score"), default=0.5)
+        normalized["confidence_delta"] = _normalize_confidence_delta(data.get("confidence_delta"))
+        normalized["unsupported_claims"] = _normalize_text_list(data.get("unsupported_claims"), limit=4, max_length=180)
+        normalized["reasoning_risks"] = _normalize_text_list(data.get("reasoning_risks"), limit=4, max_length=180)
+        normalized["verified_observations"] = _normalize_text_list(data.get("verified_observations"), limit=5, max_length=180)
+        normalized["reviewer_disposition"] = _normalize_disposition(data.get("reviewer_disposition"))
+        normalized["reasoning_depth"] = "investigation_verification"
+    return normalized
 
 
 def _normalize_report_response(data: dict) -> dict | None:
@@ -855,7 +947,48 @@ def _safe_float(value) -> float:
         return 0.0
 
 
-def _fallback_signal_analysis(signal_json: dict, available_methods: list[str] | None = None) -> dict:
+def _normalize_text_list(value, *, limit: int, max_length: int) -> list[str]:
+    if isinstance(value, list):
+        items = value
+    elif value:
+        items = [value]
+    else:
+        items = []
+    return [str(item).strip()[:max_length] for item in items[:limit] if str(item).strip()]
+
+
+def _normalize_score_01(value, *, default: float = 0.5) -> float:
+    try:
+        score = float(value)
+    except (TypeError, ValueError):
+        score = default
+    if score > 1.0:
+        score /= 10.0
+    return max(0.0, min(1.0, round(score, 3)))
+
+
+def _normalize_confidence_delta(value) -> float:
+    try:
+        delta = float(value)
+    except (TypeError, ValueError):
+        delta = 0.0
+    if abs(delta) > 1.0:
+        delta /= 10.0
+    return max(-0.5, min(0.5, round(delta, 3)))
+
+
+def _normalize_disposition(value) -> str:
+    disposition = str(value or "").strip().lower()
+    if disposition in {"supported", "uncertain", "contradicted"}:
+        return disposition
+    return "uncertain"
+
+
+def _fallback_signal_analysis(
+    signal_json: dict,
+    available_methods: list[str] | None = None,
+    analysis_mode: str = "triage",
+) -> dict:
     signal_type = str(signal_json.get("signal_type", "UNKNOWN"))
     confidence = float(signal_json.get("confidence", 0.0))
     methods_tried = signal_json.get("methods_tried", [])
@@ -894,13 +1027,47 @@ def _fallback_signal_analysis(signal_json: dict, available_methods: list[str] | 
     elif signal_type == "CORS_MISCONFIG" and confidence >= 0.85 and str(headers.get("access-control-allow-origin", "")) == "*" and str(headers.get("access-control-allow-credentials", "")).lower() == "true":
         report_ready = True
 
-    return {
+    response = {
         "confidence": round(confidence * 10, 1),
         "vuln_class": signal_type,
         "next_step": next_step,
         "report_ready": report_ready,
         "rationale": "Rule-based fallback selected the next highest-signal safe review step.",
     }
+    if analysis_mode == "investigation_synthesis":
+        strongest: list[str] = []
+        if isinstance(indicators, list) and indicators:
+            strongest.append(f"sensitive_indicators:{','.join(str(item) for item in indicators[:3])}")
+        if isinstance(status_code, int):
+            strongest.append(f"status_code:{status_code}")
+        response.update(
+            {
+                "strongest_evidence": strongest[:4],
+                "missing_evidence": ["Need stronger human-verifiable impact evidence before treating this as report-ready."],
+                "contradiction_flags": [],
+                "exploitability_summary": "Fallback synthesis preserved the strongest safe evidence but did not confirm a report-ready issue.",
+                "recommended_focus": signal_type.lower()[:120],
+                "reasoning_depth": "investigation_synthesis",
+            }
+        )
+    elif analysis_mode == "investigation_verification":
+        supported = report_ready and confidence >= 0.75
+        response.update(
+            {
+                "evidence_alignment_score": 0.78 if supported else (0.62 if confidence >= 0.6 else 0.45),
+                "confidence_delta": 0.0 if supported else (-0.08 if confidence >= 0.8 else -0.03),
+                "unsupported_claims": []
+                if supported
+                else ["Automated evidence remains suggestive rather than decisive for a submission-quality claim."],
+                "reasoning_risks": []
+                if supported
+                else ["Human validation is still required to confirm real-world impact and boundary ownership."],
+                "verified_observations": [f"status_code:{status_code}"] if isinstance(status_code, int) else [],
+                "reviewer_disposition": "supported" if supported else "uncertain",
+                "reasoning_depth": "investigation_verification",
+            }
+        )
+    return response
 
 
 def _fallback_report_section(signal_json: dict, evidence: list) -> dict:

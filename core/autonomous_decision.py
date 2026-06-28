@@ -20,6 +20,10 @@ class BoundaryHotspot:
     score: int
     status: str
     evidence: list[str]
+    reviewer_disposition: str = ""
+    evidence_alignment_score: float = 0.0
+    unsupported_claim_count: int = 0
+    reasoning_risk_count: int = 0
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -155,6 +159,22 @@ class AutonomousDecisionEngine:
             recommended_targets,
             suppressed_endpoint_families,
         )
+        strongest_hotspot_supported = (
+            strongest_hotspot is not None
+            and strongest_hotspot.unsupported_claim_count == 0
+            and strongest_hotspot.reasoning_risk_count == 0
+            and (
+                strongest_hotspot.reviewer_disposition == "supported"
+                or (
+                    strongest_hotspot.reviewer_disposition == ""
+                    and strongest_hotspot.evidence_alignment_score == 0.0
+                )
+            )
+            and (
+                strongest_hotspot.reviewer_disposition == ""
+                or strongest_hotspot.evidence_alignment_score >= 0.75
+            )
+        )
 
         if deep_hunt_escalated > 0 and hotspots:
             decision = "stop_for_human_review"
@@ -176,6 +196,7 @@ class AutonomousDecisionEngine:
             strongest_score >= 12
             and strongest_hotspot is not None
             and "session_compare_boundary_only" in strongest_hotspot.evidence
+            and strongest_hotspot_supported
         ):
             decision = "pause_for_manual_approval"
             stop_reason = "manual_approval_auth_diff_recommended"
@@ -208,7 +229,12 @@ class AutonomousDecisionEngine:
                 "readonly_variant_matrix_review",
                 "cross_surface_context_review",
             ]
-            rationale.append("Strongest current leads are boundary/cache/auth drift hotspots.")
+            if strongest_hotspot is not None and strongest_hotspot.unsupported_claim_count > 0:
+                rationale.append("Boundary/cache/auth hotspots remain active, but verification still flags unsupported claims.")
+            elif strongest_hotspot is not None and strongest_hotspot.reasoning_risk_count > 0:
+                rationale.append("Boundary/cache/auth hotspots remain active, but verification still sees reasoning risks.")
+            else:
+                rationale.append("Strongest current leads are boundary/cache/auth drift hotspots.")
         elif top_hypothesis is not None:
             decision = "continue_with_hypothesis_focus"
             stop_reason = "unresolved_readonly_hypotheses_remain"
@@ -429,6 +455,9 @@ class AutonomousDecisionEngine:
             evidence_bits: list[str] = []
             score = 0
             status = str(item.get("status", "pending"))
+            verification = item.get("investigation_verification", {})
+            if not isinstance(verification, dict):
+                verification = {}
             signal_score = int(
                 (signal_index.get(key, {}) or {}).get("evidence", {}).get("variant_signal_score", 0)
             )
@@ -457,6 +486,32 @@ class AutonomousDecisionEngine:
                 score += 1
                 evidence_bits.append("representation_drift")
 
+            reviewer_disposition = str(verification.get("reviewer_disposition", "")).strip().lower()
+            evidence_alignment_score = self._normalize_alignment_score(verification.get("evidence_alignment_score"))
+            unsupported_claim_count = self._count_list_items(verification.get("unsupported_claims"))
+            reasoning_risk_count = self._count_list_items(verification.get("reasoning_risks"))
+            if reviewer_disposition == "supported":
+                score += 3
+                evidence_bits.append("verification_supported")
+            elif reviewer_disposition == "contradicted":
+                score -= 4
+                evidence_bits.append("verification_contradicted")
+            elif reviewer_disposition == "uncertain" and evidence_alignment_score >= 0.7:
+                score += 1
+                evidence_bits.append("verification_uncertain_but_aligned")
+            if evidence_alignment_score >= 0.8:
+                score += 2
+                evidence_bits.append("verification_high_alignment")
+            elif evidence_alignment_score >= 0.65:
+                score += 1
+                evidence_bits.append("verification_moderate_alignment")
+            if unsupported_claim_count:
+                score -= min(3, unsupported_claim_count)
+                evidence_bits.append("unsupported_claims_present")
+            if reasoning_risk_count:
+                score -= min(2, reasoning_risk_count)
+                evidence_bits.append("reasoning_risks_present")
+
             if score < 4:
                 continue
 
@@ -467,6 +522,10 @@ class AutonomousDecisionEngine:
                     score=score,
                     status=status,
                     evidence=evidence_bits,
+                    reviewer_disposition=reviewer_disposition,
+                    evidence_alignment_score=evidence_alignment_score,
+                    unsupported_claim_count=unsupported_claim_count,
+                    reasoning_risk_count=reasoning_risk_count,
                 )
             )
             seen.add(key)
@@ -993,7 +1052,10 @@ class AutonomousDecisionEngine:
             for item in summary.strongest_hotspots:
                 lines.append(
                     f"- `{item.get('signal_type')}` `{item.get('endpoint')}` "
-                    f"score=`{item.get('score')}` evidence=`{item.get('evidence')}`"
+                    f"score=`{item.get('score')}` evidence=`{item.get('evidence')}` "
+                    f"reviewer=`{item.get('reviewer_disposition', '')}` "
+                    f"alignment=`{item.get('evidence_alignment_score', 0)}` "
+                    f"unsupported=`{item.get('unsupported_claim_count', 0)}`"
                 )
             lines.append("")
         if summary.intelligence_warnings or summary.intelligence_errors:
@@ -1012,3 +1074,19 @@ class AutonomousDecisionEngine:
         except json.JSONDecodeError:
             return {}
         return data if isinstance(data, dict) else {}
+
+    def _normalize_alignment_score(self, value) -> float:
+        try:
+            score = float(value)
+        except (TypeError, ValueError):
+            score = 0.0
+        if score > 1.0:
+            score /= 10.0
+        return max(0.0, min(1.0, round(score, 3)))
+
+    def _count_list_items(self, value) -> int:
+        if isinstance(value, list):
+            return len([item for item in value if str(item).strip()])
+        if value:
+            return 1
+        return 0

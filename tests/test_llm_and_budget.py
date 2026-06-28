@@ -126,6 +126,108 @@ def test_report_section_uses_task_specific_ollama_model(monkeypatch, tmp_path):
     assert captured["model_name"] == "llama3.1:8b"
 
 
+def test_signal_synthesis_returns_extended_fields(monkeypatch, tmp_path):
+    llm_client.configure_cache_dir(tmp_path / "llm-cache-synthesis")
+    llm_client._LLM_CACHE.clear()  # noqa: SLF001
+    llm_client._LLM_CACHE_STORE.clear()  # noqa: SLF001
+    llm_client._LLM_CACHE_LOADED = False  # noqa: SLF001
+
+    def fake_call(prompt, task, model_name=None):
+        assert task == "signal_synthesis"
+        return json.dumps(
+            {
+                "confidence": 8.2,
+                "vuln_class": "BROKEN_ACCESS_CONTROL",
+                "next_step": "cache_auth_boundary_investigator",
+                "report_ready": False,
+                "rationale": "Multiple passive indicators align.",
+                "strongest_evidence": ["auth requirement drift", "cache variance missing"],
+                "missing_evidence": ["Need stronger user-impact proof"],
+                "contradiction_flags": [],
+                "exploitability_summary": "Passive evidence suggests a meaningful boundary inconsistency.",
+                "recommended_focus": "session_boundary_recon",
+            }
+        )
+
+    monkeypatch.setattr(llm_client, "_resolved_ollama_model_name", lambda: "qwen3:8b")
+    monkeypatch.setattr(llm_client, "_resolved_ollama_model_name_for_task", lambda task: "qwen3:8b")
+    monkeypatch.setattr(llm_client, "_call_ollama", fake_call)
+
+    response = llm_client.analyze_signal(
+        {
+            "signal_type": "BROKEN_ACCESS_CONTROL",
+            "endpoint": "https://api-staging.airtable.com/v0/meta/bases",
+            "priority": "HIGH",
+            "confidence": 0.78,
+            "status": "investigating",
+            "methods_tried": ["session_boundary_evidence_review"],
+            "findings": [{"kind": "session_boundary_evidence_review"}],
+            "evidence": {"variant_signal_score": 5},
+        },
+        available_methods=["cache_auth_boundary_investigator", "readonly_variant_matrix_review"],
+        analysis_mode="investigation_synthesis",
+    )
+
+    payload = json.loads(response.text)
+    assert payload["reasoning_depth"] == "investigation_synthesis"
+    assert payload["strongest_evidence"][:2] == ["auth requirement drift", "cache variance missing"]
+    assert payload["recommended_focus"] == "session_boundary_recon"
+
+
+def test_signal_verification_returns_extended_fields(monkeypatch, tmp_path):
+    llm_client.configure_cache_dir(tmp_path / "llm-cache-verification")
+    llm_client._LLM_CACHE.clear()  # noqa: SLF001
+    llm_client._LLM_CACHE_STORE.clear()  # noqa: SLF001
+    llm_client._LLM_CACHE_LOADED = False  # noqa: SLF001
+
+    def fake_call(prompt, task, model_name=None):
+        assert task == "signal_verification"
+        return json.dumps(
+            {
+                "confidence": 7.4,
+                "vuln_class": "BROKEN_ACCESS_CONTROL",
+                "next_step": "cache_auth_boundary_investigator",
+                "report_ready": False,
+                "rationale": "Evidence is directionally strong but still incomplete.",
+                "evidence_alignment_score": 0.81,
+                "confidence_delta": -0.2,
+                "unsupported_claims": ["Direct tenant-impact proof is still missing."],
+                "reasoning_risks": ["Boundary drift could still be an intentional staging split."],
+                "verified_observations": ["auth mode changes response class", "vary header stays weak"],
+                "reviewer_disposition": "uncertain",
+            }
+        )
+
+    monkeypatch.setattr(llm_client, "_resolved_ollama_model_name", lambda: "qwen3:8b")
+    monkeypatch.setattr(llm_client, "_resolved_ollama_model_name_for_task", lambda task: "qwen3:8b")
+    monkeypatch.setattr(llm_client, "_call_ollama", fake_call)
+
+    response = llm_client.analyze_signal(
+        {
+            "signal_type": "BROKEN_ACCESS_CONTROL",
+            "endpoint": "https://api-staging.airtable.com/v0/meta/bases",
+            "priority": "HIGH",
+            "confidence": 0.82,
+            "status": "investigating",
+            "methods_tried": ["session_boundary_evidence_review", "readonly_variant_matrix_review"],
+            "findings": [{"kind": "session_boundary_evidence_review"}],
+            "investigation_summary": {
+                "recommended_focus": "session_boundary_recon",
+                "strongest_evidence": ["auth boundary drift"],
+            },
+            "evidence": {"variant_signal_score": 5},
+        },
+        available_methods=["cache_auth_boundary_investigator", "readonly_variant_matrix_review"],
+        analysis_mode="investigation_verification",
+    )
+
+    payload = json.loads(response.text)
+    assert payload["reasoning_depth"] == "investigation_verification"
+    assert payload["evidence_alignment_score"] == 0.81
+    assert payload["unsupported_claims"] == ["Direct tenant-impact proof is still missing."]
+    assert payload["reviewer_disposition"] == "uncertain"
+
+
 def test_llm_persistent_cache_reuses_previous_response(monkeypatch, tmp_path):
     trace_path = tmp_path / "llm_traces.jsonl"
     cache_dir = tmp_path / "llm-cache"

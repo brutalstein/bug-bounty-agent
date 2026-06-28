@@ -393,3 +393,90 @@ def test_autonomous_decision_pivots_when_only_suppressed_families_remain(tmp_pat
     assert summary.stop_reason == "existing_boundary_families_exhausted_expand_to_new_surfaces"
     assert summary.next_cycle_focus == "developer_surface_recon"
     assert "https://api-staging.airtable.com/v0" in summary.suppressed_endpoint_families
+
+
+def test_autonomous_decision_avoids_manual_approval_when_verification_has_unsupported_claims(tmp_path):
+    run_dir = tmp_path / "run-verify-guard"
+    parsed_dir = run_dir / "parsed"
+    reports_dir = run_dir / "reports"
+    parsed_dir.mkdir(parents=True)
+    reports_dir.mkdir(parents=True)
+
+    (run_dir / "run.json").write_text(
+        json.dumps(
+            {
+                "target_url": "https://staging.airtable.com",
+                "profile_name": "airtable-staging-public-h1",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (parsed_dir / "signals.json").write_text(
+        json.dumps(
+            {
+                "high_count": 1,
+                "critical_count": 0,
+                "total_signals": 1,
+                "signals": [
+                    {
+                        "signal_type": "BROKEN_ACCESS_CONTROL",
+                        "endpoint": "https://api-staging.airtable.com/v0/meta/bases",
+                        "evidence": {"variant_signal_score": 6},
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (parsed_dir / "deep_hunt.json").write_text(
+        json.dumps(
+            {
+                "escalated_count": 0,
+                "signals": [
+                    {
+                        "signal_type": "BROKEN_ACCESS_CONTROL",
+                        "endpoint": "https://api-staging.airtable.com/v0/meta/bases",
+                        "status": "pending",
+                        "findings": [
+                            {"kind": "session_boundary_evidence_review"},
+                            {"kind": "readonly_variant_matrix_review"},
+                        ],
+                        "investigation_verification": {
+                            "reviewer_disposition": "uncertain",
+                            "evidence_alignment_score": 0.78,
+                            "unsupported_claims": ["Need direct tenant impact proof."],
+                            "reasoning_risks": [],
+                        },
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (parsed_dir / "session_compare.json").write_text(
+        json.dumps(
+            {
+                "items": [
+                    {
+                        "url": "https://api-staging.airtable.com/v0/meta/bases",
+                        "variant_signal_score": 8,
+                        "accessibility_changed": True,
+                        "auth_requirement_changed": True,
+                        "cache_validator_reused": True,
+                        "auth_vary_missing": True,
+                        "representation_changed": True,
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    (parsed_dir / "review_queue.json").write_text(json.dumps({"start_now_count": 1}), encoding="utf-8")
+    (parsed_dir / "final_report_draft.json").write_text(json.dumps({"candidate_items": 0}), encoding="utf-8")
+
+    summary = AutonomousDecisionEngine(run_dir).build()
+
+    assert summary.decision == "continue_with_boundary_focus"
+    assert summary.manual_approval_recommended is False
+    assert summary.next_cycle_focus == "boundary_hotspot_recon"
+    assert any("unsupported claims" in item.lower() for item in summary.rationale)

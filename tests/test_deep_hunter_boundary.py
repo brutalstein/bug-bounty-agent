@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from core import deep_hunter as deep_hunter_module
 from core.deep_hunter import DeepHunter
 from core.run_context import create_run_context
 from core.scope import ScopeManager
@@ -369,6 +370,300 @@ def test_deep_hunter_uses_hypothesis_ledger_method_bias(tmp_path):
         assert methods[:2] == [
             "cache_auth_boundary_investigator",
             "readonly_variant_matrix_review",
+        ]
+    finally:
+        Path(ctx.run_dir).rename(tmp_path / Path(ctx.run_dir).name)
+
+
+def test_deep_hunter_runs_investigation_synthesis_for_strong_boundary_signal(monkeypatch, tmp_path):
+    ctx = create_run_context(
+        target_name="airtable-staging-public-h1",
+        target_url="https://api-staging.airtable.com/v0/meta/bases",
+        mode="authorized",
+        profile_name="airtable-staging-public-h1",
+        program_name="Airtable HackerOne Bug Bounty",
+        program_url="https://hackerone.com/airtable",
+        authorization_kind="public_bug_bounty_policy",
+        authorization_confirmed=True,
+    )
+    try:
+        run_dir = Path(ctx.run_dir)
+        parsed_dir = run_dir / "parsed"
+        reports_dir = run_dir / "reports"
+        parsed_dir.mkdir(parents=True, exist_ok=True)
+        reports_dir.mkdir(parents=True, exist_ok=True)
+
+        (parsed_dir / "signals.json").write_text(
+            json.dumps(
+                {
+                    "signals": [
+                        {
+                            "signal_id": "sig-synth",
+                            "signal_type": "BROKEN_ACCESS_CONTROL",
+                            "endpoint": "https://api-staging.airtable.com/v0/meta/bases",
+                            "method": "GET",
+                            "priority": "HIGH",
+                            "confidence": 0.78,
+                            "bounty_potential": "$$",
+                            "investigation_budget": 2,
+                            "status": "pending",
+                            "methods_tried": [],
+                            "findings": [],
+                            "evidence": {
+                                "matched_rule": "session_compare_access_boundary_changed",
+                                "variant_signal_score": 5,
+                                "llm_candidate": True,
+                            },
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        (parsed_dir / "session_compare.json").write_text(
+            json.dumps(
+                {
+                    "items": [
+                        {
+                            "url": "https://api-staging.airtable.com/v0/meta/bases",
+                            "variant_signal_score": 5,
+                            "accessibility_changed": True,
+                            "auth_requirement_changed": True,
+                            "cache_validator_reused": True,
+                            "auth_vary_missing": True,
+                            "representation_changed": True,
+                            "method_observations": [],
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        (parsed_dir / "endpoint_validation.json").write_text(json.dumps({"results": []}), encoding="utf-8")
+        (parsed_dir / "ranked_candidates.json").write_text(json.dumps({"ranked_candidates": []}), encoding="utf-8")
+        (parsed_dir / "js_analysis.json").write_text(json.dumps({"assets": []}), encoding="utf-8")
+        (parsed_dir / "passive_surface_diff.json").write_text(json.dumps({"hypotheses": []}), encoding="utf-8")
+        (parsed_dir / "session_surface_compare.json").write_text(json.dumps({"hypotheses": []}), encoding="utf-8")
+
+        calls: list[tuple[str, str]] = []
+
+        class FakeResponse:
+            def __init__(self, payload: dict):
+                self.text = json.dumps(payload)
+                self.backend = "openai"
+                self.model = "gpt-5.5-mini"
+                self.fallback_used = False
+                self.cache_hit = False
+
+        def fake_analyze_signal(signal_json, available_methods=None, *, analysis_mode="triage"):
+            calls.append((signal_json.get("signal_id", ""), analysis_mode))
+            if analysis_mode == "investigation_synthesis":
+                return FakeResponse(
+                    {
+                        "confidence": 9.2,
+                        "vuln_class": "BROKEN_ACCESS_CONTROL",
+                        "next_step": "cache_auth_boundary_investigator",
+                        "report_ready": True,
+                        "rationale": "Boundary drift is consistent across passive evidence.",
+                        "strongest_evidence": ["cache boundary reused across auth modes"],
+                        "missing_evidence": ["Need final human impact validation"],
+                        "contradiction_flags": [],
+                        "exploitability_summary": "Passive evidence strongly supports boundary inconsistency.",
+                        "recommended_focus": "session_boundary_recon",
+                        "reasoning_depth": "investigation_synthesis",
+                    }
+                )
+            if analysis_mode == "investigation_verification":
+                return FakeResponse(
+                    {
+                        "confidence": 9.1,
+                        "vuln_class": "BROKEN_ACCESS_CONTROL",
+                        "next_step": "cache_auth_boundary_investigator",
+                        "report_ready": True,
+                        "rationale": "The synthesized claim is well-supported by the passive evidence.",
+                        "evidence_alignment_score": 0.9,
+                        "confidence_delta": 0.0,
+                        "unsupported_claims": [],
+                        "reasoning_risks": [],
+                        "verified_observations": ["auth requirement drift", "representation changes"],
+                        "reviewer_disposition": "supported",
+                        "reasoning_depth": "investigation_verification",
+                    }
+                )
+            return FakeResponse(
+                {
+                    "confidence": 7.8,
+                    "vuln_class": "BROKEN_ACCESS_CONTROL",
+                    "next_step": "cache_auth_boundary_investigator",
+                    "report_ready": False,
+                    "rationale": "Continue boundary mapping.",
+                }
+            )
+
+        monkeypatch.setattr(deep_hunter_module, "current_llm_backend", lambda task: "openai")
+        monkeypatch.setattr(deep_hunter_module, "analyze_signal", fake_analyze_signal)
+
+        hunter = DeepHunter(
+            scope=ScopeManager("configs/scope.yaml", profile_name="airtable-staging-public-h1"),
+            run_context=ctx,
+        )
+        summary = hunter.run(max_signals=1)
+
+        signal = summary.signals[0]
+        assert ("sig-synth", "investigation_synthesis") in calls
+        assert ("sig-synth", "investigation_verification") in calls
+        assert signal["investigation_summary"]["reasoning_depth"] == "investigation_synthesis"
+        assert signal["investigation_verification"]["reasoning_depth"] == "investigation_verification"
+        assert signal["confidence"] >= 0.9
+        assert any(
+            isinstance(item, dict) and item.get("stage") == "investigation_synthesis"
+            for item in signal.get("llm_notes", [])
+        )
+        assert any(
+            isinstance(item, dict) and item.get("stage") == "investigation_verification"
+            for item in signal.get("llm_notes", [])
+        )
+    finally:
+        Path(ctx.run_dir).rename(tmp_path / Path(ctx.run_dir).name)
+
+
+def test_deep_hunter_verification_dampens_overclaiming_boundary_signal(monkeypatch, tmp_path):
+    ctx = create_run_context(
+        target_name="airtable-staging-public-h1",
+        target_url="https://api-staging.airtable.com/v0/meta/bases",
+        mode="authorized",
+        profile_name="airtable-staging-public-h1",
+        program_name="Airtable HackerOne Bug Bounty",
+        program_url="https://hackerone.com/airtable",
+        authorization_kind="public_bug_bounty_policy",
+        authorization_confirmed=True,
+    )
+    try:
+        run_dir = Path(ctx.run_dir)
+        parsed_dir = run_dir / "parsed"
+        reports_dir = run_dir / "reports"
+        parsed_dir.mkdir(parents=True, exist_ok=True)
+        reports_dir.mkdir(parents=True, exist_ok=True)
+
+        (parsed_dir / "signals.json").write_text(
+            json.dumps(
+                {
+                    "signals": [
+                        {
+                            "signal_id": "sig-verify",
+                            "signal_type": "BROKEN_ACCESS_CONTROL",
+                            "endpoint": "https://api-staging.airtable.com/v0/meta/bases",
+                            "method": "GET",
+                            "priority": "HIGH",
+                            "confidence": 0.79,
+                            "bounty_potential": "$$",
+                            "investigation_budget": 2,
+                            "status": "pending",
+                            "methods_tried": [],
+                            "findings": [],
+                            "evidence": {
+                                "matched_rule": "session_compare_access_boundary_changed",
+                                "variant_signal_score": 5,
+                                "llm_candidate": True,
+                            },
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        (parsed_dir / "session_compare.json").write_text(
+            json.dumps(
+                {
+                    "items": [
+                        {
+                            "url": "https://api-staging.airtable.com/v0/meta/bases",
+                            "variant_signal_score": 5,
+                            "accessibility_changed": True,
+                            "auth_requirement_changed": True,
+                            "cache_validator_reused": True,
+                            "auth_vary_missing": True,
+                            "representation_changed": True,
+                            "method_observations": [],
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        (parsed_dir / "endpoint_validation.json").write_text(json.dumps({"results": []}), encoding="utf-8")
+        (parsed_dir / "ranked_candidates.json").write_text(json.dumps({"ranked_candidates": []}), encoding="utf-8")
+        (parsed_dir / "js_analysis.json").write_text(json.dumps({"assets": []}), encoding="utf-8")
+        (parsed_dir / "passive_surface_diff.json").write_text(json.dumps({"hypotheses": []}), encoding="utf-8")
+        (parsed_dir / "session_surface_compare.json").write_text(json.dumps({"hypotheses": []}), encoding="utf-8")
+
+        class FakeResponse:
+            def __init__(self, payload: dict):
+                self.text = json.dumps(payload)
+                self.backend = "openai"
+                self.model = "gpt-5.5-mini"
+                self.fallback_used = False
+                self.cache_hit = False
+
+        def fake_analyze_signal(signal_json, available_methods=None, *, analysis_mode="triage"):
+            if analysis_mode == "investigation_synthesis":
+                return FakeResponse(
+                    {
+                        "confidence": 9.2,
+                        "vuln_class": "BROKEN_ACCESS_CONTROL",
+                        "next_step": "cache_auth_boundary_investigator",
+                        "report_ready": True,
+                        "rationale": "Boundary drift appears strong at first pass.",
+                        "strongest_evidence": ["auth boundary drift"],
+                        "missing_evidence": ["Need final human validation"],
+                        "contradiction_flags": [],
+                        "exploitability_summary": "A promising passive signal exists.",
+                        "recommended_focus": "session_boundary_recon",
+                        "reasoning_depth": "investigation_synthesis",
+                    }
+                )
+            if analysis_mode == "investigation_verification":
+                return FakeResponse(
+                    {
+                        "confidence": 7.1,
+                        "vuln_class": "BROKEN_ACCESS_CONTROL",
+                        "next_step": "cache_auth_boundary_investigator",
+                        "report_ready": False,
+                        "rationale": "The first-pass conclusion overstates impact.",
+                        "evidence_alignment_score": 0.52,
+                        "confidence_delta": -0.2,
+                        "unsupported_claims": ["No tenant-level impact proof is present yet."],
+                        "reasoning_risks": ["Passive cache drift may still be benign staging behavior."],
+                        "verified_observations": ["Auth mode changes are real."],
+                        "reviewer_disposition": "uncertain",
+                        "reasoning_depth": "investigation_verification",
+                    }
+                )
+            return FakeResponse(
+                {
+                    "confidence": 7.9,
+                    "vuln_class": "BROKEN_ACCESS_CONTROL",
+                    "next_step": "cache_auth_boundary_investigator",
+                    "report_ready": False,
+                    "rationale": "Continue boundary review.",
+                }
+            )
+
+        monkeypatch.setattr(deep_hunter_module, "current_llm_backend", lambda task: "openai")
+        monkeypatch.setattr(deep_hunter_module, "analyze_signal", fake_analyze_signal)
+
+        hunter = DeepHunter(
+            scope=ScopeManager("configs/scope.yaml", profile_name="airtable-staging-public-h1"),
+            run_context=ctx,
+        )
+        summary = hunter.run(max_signals=1)
+
+        signal = summary.signals[0]
+        assert signal["investigation_verification"]["reviewer_disposition"] == "uncertain"
+        assert signal["confidence"] < 0.9
+        assert signal["confidence"] <= 0.79
+        assert signal["investigation_verification"]["unsupported_claims"] == [
+            "No tenant-level impact proof is present yet."
         ]
     finally:
         Path(ctx.run_dir).rename(tmp_path / Path(ctx.run_dir).name)

@@ -34,7 +34,7 @@ from core.lab_manager import LabManager
 from core.llm_client import llm_runtime_snapshot, temporary_llm_runtime
 from core.operator_memory import OperatorMemoryAnalyzer, OperatorMemorySummary
 from core.profile_readiness import ProfileReadinessAssessor
-from core.run_catalog import list_run_dirs as list_real_run_dirs
+from core.run_catalog import HIDDEN_STATE_DIRNAME, list_run_dirs as list_real_run_dirs
 from core.run_housekeeping import RunHousekeeper, RunHousekeepingSummary
 from core.scope import ScopeManager
 
@@ -150,6 +150,8 @@ class AutonomousAgent:
         self.state_trace: list[AgentStateTraceEntry] = []
         self.operator_memory_summary: OperatorMemorySummary | None = None
         self.housekeeping_summary: RunHousekeepingSummary | None = None
+        self.operator_runtime_dir = self.project_root / "runs" / HIDDEN_STATE_DIRNAME / "operator_runtime"
+        self.operator_runtime_dir.mkdir(parents=True, exist_ok=True)
 
     def run(
         self,
@@ -237,6 +239,7 @@ class AutonomousAgent:
             self.project_root / "runs",
             scope.config.profile_name,
         ).build()
+        startup_recommendation = self.load_operator_runtime_state(scope.config.profile_name)
         self._record_state(
             state_name="MEMORY_SYNC",
             status="completed",
@@ -252,6 +255,20 @@ class AutonomousAgent:
                 else "",
             ],
         )
+        if startup_recommendation:
+            self._record_state(
+                state_name="STARTUP_STRATEGY",
+                status="completed",
+                reason=(
+                    "Loaded the latest no-arg operator recommendation to bias the initial cycle safely."
+                ),
+                safety_gates_checked=["startup_recommendation_state", "scope_preserved"],
+                artifact_outputs=[self._operator_runtime_state_path(scope.config.profile_name)],
+                warnings=[
+                    f"focus={startup_recommendation.get('next_cycle_focus', '')}",
+                    f"strategy={startup_recommendation.get('recommended_strategy_pack', '')}",
+                ],
+            )
         self._record_state(
             state_name="POLICY_VERIFY",
             status="completed",
@@ -276,6 +293,12 @@ class AutonomousAgent:
 
         derived_targets = self.derive_targets(scope, selected_target)
         derived_targets = self._apply_operator_memory_targets(derived_targets, selected_target)
+        derived_targets = self._apply_operator_runtime_targets(
+            derived_targets,
+            selected_target,
+            scope,
+            startup_recommendation,
+        )
         print_status("info", f"Selected profile: {selected.profile_name}")
         print_status("info", f"Selected target: {selected_target}")
         if derived_targets:
@@ -295,6 +318,7 @@ class AutonomousAgent:
             selected_target=selected_target,
             derived_targets=derived_targets,
             max_cycles=max_cycles,
+            startup_recommendation=startup_recommendation,
         )
         if not cycle_plans:
             self._record_state(
@@ -343,6 +367,7 @@ class AutonomousAgent:
             evaluations.append(evaluation)
             used_targets.extend(str(item) for item in plan.get("targets", []) if str(item).strip())
             self._write_operator_context(run_dir)
+            self.write_operator_runtime_state(selected.profile_name, run_dir, evaluation)
             self._print_run_evaluation(evaluation)
             self.write_agent_summary(run_dir, evaluations, selected.profile_name, selected_target)
             self.write_agent_state_trace(run_dir)
@@ -539,6 +564,7 @@ class AutonomousAgent:
         selected_target: str,
         derived_targets: list[str],
         max_cycles: int,
+        startup_recommendation: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         plans: list[dict[str, Any]] = []
         if not scope.capability_enabled("passive_recon"):
@@ -696,6 +722,7 @@ class AutonomousAgent:
                 continue
             seen_labels.add(plan["label"])
             deduped.append(plan)
+        deduped = self._apply_startup_operator_strategy(deduped, startup_recommendation)
         return deduped[:max_cycles]
 
     def evaluate_run(self, run_dir: Path, flow_name: str) -> RunEvaluation:
@@ -1110,6 +1137,71 @@ class AutonomousAgent:
                 follow_up["report_model"] = evaluation.recommended_report_model
         return updated
 
+    def _apply_startup_operator_strategy(
+        self,
+        plans: list[dict[str, Any]],
+        recommendation: dict[str, Any] | None,
+    ) -> list[dict[str, Any]]:
+        if not recommendation:
+            return plans
+
+        focus = str(recommendation.get("next_cycle_focus", "")).strip()
+        highest_priority_target = str(recommendation.get("highest_priority_target", "")).strip()
+        recommended_signal_type = str(recommendation.get("recommended_signal_type", "")).strip()
+        recommended_strategy_pack = str(recommendation.get("recommended_strategy_pack", "")).strip()
+        recommended_method_sequence = [
+            str(item).strip()
+            for item in recommendation.get("recommended_method_sequence", [])
+            if str(item).strip()
+        ]
+        recommended_targets = [
+            str(item).strip()
+            for item in recommendation.get("recommended_targets", [])
+            if str(item).strip()
+        ]
+        llm_profile = str(recommendation.get("recommended_llm_profile", "")).strip()
+        llm_provider = str(recommendation.get("recommended_llm_provider", "")).strip()
+        reasoning_model = str(recommendation.get("recommended_reasoning_model", "")).strip()
+        report_model = str(recommendation.get("recommended_report_model", "")).strip()
+
+        updated_plans: list[dict[str, Any]] = []
+        for plan in deepcopy(plans):
+            if recommended_targets and plan.get("execution") == "internal_surface_recon":
+                existing_targets = [str(item).strip() for item in plan.get("targets", []) if str(item).strip()]
+                if len(existing_targets) >= 2 and self._plan_focus_score(plan, focus, highest_priority_target) > 0:
+                    target_limit = max(2, min(len(existing_targets), 4))
+                    merged_targets = [item for item in dict.fromkeys(recommended_targets + existing_targets) if item]
+                    plan["targets"] = merged_targets[:target_limit]
+                    argv = list(plan.get("argv", []))
+                    if len(argv) >= 4:
+                        plan["argv"] = argv[:3] + plan["targets"]
+            for follow_up in plan.get("follow_ups", []):
+                if str(follow_up.get("kind", "")).strip() != "deep_hunt":
+                    continue
+                if recommended_signal_type:
+                    follow_up["signal_type"] = recommended_signal_type
+                if recommended_strategy_pack:
+                    follow_up["strategy_pack"] = recommended_strategy_pack
+                if recommended_method_sequence:
+                    follow_up["preferred_methods"] = list(recommended_method_sequence)
+                if llm_profile:
+                    follow_up["llm_profile"] = llm_profile
+                if llm_provider:
+                    follow_up["llm_provider"] = llm_provider
+                if reasoning_model:
+                    follow_up["reasoning_model"] = reasoning_model
+                if report_model:
+                    follow_up["report_model"] = report_model
+            updated_plans.append(plan)
+
+        return sorted(
+            updated_plans,
+            key=lambda item: (
+                -self._plan_focus_score(item, focus, highest_priority_target),
+                item.get("label", ""),
+            ),
+        )
+
     def execute_plan(self, plan: dict[str, Any]) -> None:
         if plan.get("execution") == "internal_surface_recon":
             targets = [str(item) for item in plan.get("targets", []) if str(item).strip()]
@@ -1317,6 +1409,26 @@ class AutonomousAgent:
         merged = [item for item in dict.fromkeys(prioritized + deferred) if item]
         return merged or [selected]
 
+    def _apply_operator_runtime_targets(
+        self,
+        targets: list[str],
+        selected_target: str,
+        scope: ScopeManager,
+        recommendation: dict[str, Any] | None,
+    ) -> list[str]:
+        if not recommendation:
+            return targets
+        prioritized: list[str] = [str(selected_target).strip()]
+        highest_priority_target = str(recommendation.get("highest_priority_target", "")).strip()
+        if highest_priority_target and scope.is_target_allowed(highest_priority_target):
+            prioritized.append(highest_priority_target)
+        for item in recommendation.get("recommended_targets", []):
+            normalized = str(item).strip()
+            if normalized and scope.is_target_allowed(normalized):
+                prioritized.append(normalized)
+        prioritized.extend(str(item).strip() for item in targets if str(item).strip())
+        return [item for item in dict.fromkeys(prioritized) if item]
+
     def _surface_focus_for_decision_focus(self, focus: str) -> str:
         mapping = {
             "boundary_hotspot_recon": "boundary",
@@ -1334,6 +1446,44 @@ class AutonomousAgent:
         if not parts:
             return f"{parsed.scheme}://{parsed.netloc}/"
         return f"{parsed.scheme}://{parsed.netloc}/{parts[0]}"
+
+    def _operator_runtime_state_path(self, profile_name: str) -> str:
+        return str(self.operator_runtime_dir / f"{profile_name}.json")
+
+    def load_operator_runtime_state(self, profile_name: str) -> dict[str, Any]:
+        path = self.operator_runtime_dir / f"{profile_name}.json"
+        payload = self._read_json(path)
+        if str(payload.get("profile_name", "")).strip() != str(profile_name).strip():
+            return {}
+        return payload
+
+    def write_operator_runtime_state(
+        self,
+        profile_name: str,
+        run_dir: Path,
+        evaluation: RunEvaluation,
+    ) -> None:
+        decision = self._read_json(run_dir / "parsed" / "autonomous_decision.json")
+        payload = {
+            "profile_name": profile_name,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "source_run_dir": str(run_dir),
+            "decision": evaluation.decision,
+            "stop_reason": evaluation.stop_reason,
+            "next_cycle_focus": evaluation.next_cycle_focus,
+            "highest_priority_target": evaluation.highest_priority_target,
+            "recommended_strategy_pack": evaluation.recommended_strategy_pack,
+            "recommended_signal_type": evaluation.recommended_signal_type,
+            "recommended_method_sequence": list(evaluation.recommended_method_sequence),
+            "recommended_llm_profile": evaluation.recommended_llm_profile,
+            "recommended_llm_provider": evaluation.recommended_llm_provider,
+            "recommended_reasoning_model": evaluation.recommended_reasoning_model,
+            "recommended_report_model": evaluation.recommended_report_model,
+            "recommended_targets": decision.get("recommended_targets", []) if isinstance(decision, dict) else [],
+            "strongest_hotspots": decision.get("strongest_hotspots", []) if isinstance(decision, dict) else [],
+        }
+        path = self.operator_runtime_dir / f"{profile_name}.json"
+        path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
 
     def _record_state(
         self,

@@ -170,7 +170,7 @@ class DeepHunter:
             and isinstance(item.get("evidence", {}), dict)
             and item.get("evidence", {}).get("llm_candidate") is True
         )
-        self.llm_review_budget_limit = max(2, min(10, max(len(selected_signals) * 2, llm_candidate_count * 3)))
+        self.llm_review_budget_limit = max(3, min(12, max(len(selected_signals) * 3, llm_candidate_count * 4)))
         preferred_order = [str(item).strip() for item in (preferred_methods or []) if str(item).strip()]
         for signal in selected_signals:
             investigated.append(
@@ -302,6 +302,18 @@ class DeepHunter:
                 findings_delta=findings_delta,
             )
             self._post_method_llm_review(
+                signal,
+                available_methods,
+                confidence_delta=round(confidence_after - confidence_before, 4),
+                findings_delta=findings_delta,
+            )
+            self._maybe_run_investigation_synthesis(
+                signal,
+                available_methods,
+                confidence_delta=round(confidence_after - confidence_before, 4),
+                findings_delta=findings_delta,
+            )
+            self._maybe_run_investigation_verification(
                 signal,
                 available_methods,
                 confidence_delta=round(confidence_after - confidence_before, 4),
@@ -544,9 +556,125 @@ class DeepHunter:
 
         payload = self._safe_parse_json(response.text) or {}
         if payload:
-            signal.setdefault("llm_notes", []).append(payload)
+            signal.setdefault("llm_notes", []).append({"stage": "post_method_review", **payload})
             if payload.get("report_ready") is True and self._has_high_value_evidence(signal):
                 signal["confidence"] = max(float(signal.get("confidence", 0.0)), 0.9)
+
+    def _maybe_run_investigation_synthesis(
+        self,
+        signal: dict,
+        available_methods: list[str],
+        *,
+        confidence_delta: float,
+        findings_delta: int,
+    ) -> None:
+        if not self._should_use_llm(
+            signal,
+            stage="investigation_synthesis",
+            confidence_delta=confidence_delta,
+            findings_delta=findings_delta,
+            available_method_count=len(available_methods),
+        ):
+            return
+
+        response = self._run_signal_llm_review(
+            signal,
+            stage="investigation_synthesis",
+            available_methods=available_methods,
+            analysis_mode="investigation_synthesis",
+        )
+        if response is None:
+            return
+
+        payload = self._safe_parse_json(response.text) or {}
+        if not payload:
+            return
+
+        signal["investigation_summary"] = payload
+        signal.setdefault("llm_notes", []).append({"stage": "investigation_synthesis", **payload})
+        contradiction_flags = payload.get("contradiction_flags", [])
+        strongest_evidence = payload.get("strongest_evidence", [])
+        if payload.get("report_ready") is True and self._has_high_value_evidence(signal):
+            signal["confidence"] = max(float(signal.get("confidence", 0.0)), 0.92)
+        elif isinstance(contradiction_flags, list) and contradiction_flags and not self._has_high_value_evidence(signal):
+            signal["confidence"] = max(0.1, float(signal.get("confidence", 0.0)) - 0.05)
+        elif isinstance(strongest_evidence, list) and strongest_evidence and self._has_high_value_evidence(signal):
+            signal["confidence"] = min(0.95, float(signal.get("confidence", 0.0)) + 0.03)
+
+    def _maybe_run_investigation_verification(
+        self,
+        signal: dict,
+        available_methods: list[str],
+        *,
+        confidence_delta: float,
+        findings_delta: int,
+    ) -> None:
+        if not self._should_use_llm(
+            signal,
+            stage="investigation_verification",
+            confidence_delta=confidence_delta,
+            findings_delta=findings_delta,
+            available_method_count=len(available_methods),
+        ):
+            return
+
+        response = self._run_signal_llm_review(
+            signal,
+            stage="investigation_verification",
+            available_methods=available_methods,
+            analysis_mode="investigation_verification",
+        )
+        if response is None:
+            return
+
+        payload = self._safe_parse_json(response.text) or {}
+        if not payload:
+            return
+
+        signal["investigation_verification"] = payload
+        signal.setdefault("llm_notes", []).append({"stage": "investigation_verification", **payload})
+        self._apply_verification_calibration(signal, payload)
+
+    def _apply_verification_calibration(self, signal: dict, payload: dict) -> None:
+        current_confidence = float(signal.get("confidence", 0.0))
+        verified_confidence = max(0.0, min(1.0, float(payload.get("confidence", 0.0)) / 10.0))
+        alignment_score = self._normalize_alignment_score(payload.get("evidence_alignment_score"))
+        confidence_delta = self._normalize_verification_delta(payload.get("confidence_delta"))
+        unsupported_claims = payload.get("unsupported_claims", [])
+        reasoning_risks = payload.get("reasoning_risks", [])
+        reviewer_disposition = str(payload.get("reviewer_disposition", "uncertain")).strip().lower()
+        has_high_value_evidence = self._has_high_value_evidence(signal)
+
+        proposed_confidence = max(0.1, min(0.95, verified_confidence + confidence_delta))
+        if isinstance(unsupported_claims, list) and unsupported_claims:
+            confidence_cap = 0.82 if has_high_value_evidence else 0.74
+            calibrated = min(current_confidence, proposed_confidence, confidence_cap)
+            if isinstance(reasoning_risks, list) and reasoning_risks:
+                calibrated = max(0.1, calibrated - 0.03)
+            signal["confidence"] = round(calibrated, 4)
+            return
+
+        if reviewer_disposition == "contradicted":
+            signal["confidence"] = round(max(0.1, min(current_confidence, proposed_confidence) - 0.05), 4)
+            return
+
+        if (
+            payload.get("report_ready") is True
+            and reviewer_disposition == "supported"
+            and alignment_score >= 0.8
+            and not reasoning_risks
+            and has_high_value_evidence
+        ):
+            signal["confidence"] = round(max(current_confidence, min(0.93, proposed_confidence + 0.02)), 4)
+            return
+
+        weighted = (current_confidence * 0.4) + (proposed_confidence * 0.6)
+        weighted *= 0.75 + (alignment_score * 0.25)
+        if reviewer_disposition == "uncertain" and alignment_score < 0.55:
+            weighted = min(weighted, current_confidence)
+        if isinstance(reasoning_risks, list) and reasoning_risks:
+            weighted = min(weighted, current_confidence + 0.01)
+        signal["confidence"] = round(max(0.1, min(0.95, weighted)), 4)
 
     def _should_use_llm(
         self,
@@ -583,6 +711,24 @@ class DeepHunter:
         if stage in {"method_selection", "post_method_review"} and self.llm_signal_counts.get(self._signal_key(signal), 0) >= 2:
             return False
 
+        if stage == "investigation_synthesis":
+            if self.llm_signal_counts.get(self._signal_key(signal), 0) >= 4:
+                return False
+            if len(signal.get("findings", [])) < 2:
+                return False
+            if not self._has_high_value_evidence(signal) and confidence < 0.72 and findings_delta <= 0:
+                return False
+
+        if stage == "investigation_verification":
+            if self.llm_signal_counts.get(self._signal_key(signal), 0) >= 5:
+                return False
+            if not isinstance(signal.get("investigation_summary"), dict) or not signal.get("investigation_summary"):
+                return False
+            if len(signal.get("findings", [])) < 2:
+                return False
+            if not self._has_high_value_evidence(signal) and confidence < 0.74 and findings_delta <= 0:
+                return False
+
         if stage == "post_method_review":
             if findings_delta <= 0 and abs(confidence_delta) < 0.03 and not llm_candidate and priority != "CRITICAL":
                 return False
@@ -602,16 +748,18 @@ class DeepHunter:
         signal: dict,
         stage: str,
         available_methods: list[str] | None = None,
+        *,
+        analysis_mode: str = "triage",
     ):
         signal_key = self._signal_key(signal)
-        stage_hash = self._llm_stage_hash(signal, stage, available_methods)
+        stage_hash = self._llm_stage_hash(signal, stage, available_methods, analysis_mode=analysis_mode)
         if self.llm_stage_hashes.get(signal_key, {}).get(stage) == stage_hash:
             return None
 
-        response = analyze_signal(signal, available_methods=available_methods)
+        response = analyze_signal(signal, available_methods=available_methods, analysis_mode=analysis_mode)
         self.llm_review_budget_used += 1
         self.llm_signal_counts[signal_key] = self.llm_signal_counts.get(signal_key, 0) + 1
-        self._record_llm_usage(signal, stage, response)
+        self._record_llm_usage(signal, stage, response, analysis_mode=analysis_mode)
         self.llm_stage_hashes.setdefault(signal_key, {})[stage] = stage_hash
         return response
 
@@ -632,9 +780,17 @@ class DeepHunter:
     def _signal_key(self, signal: dict) -> str:
         return str(signal.get("signal_id") or f"{signal.get('signal_type', 'signal')}::{signal.get('endpoint', 'unknown')}")
 
-    def _llm_stage_hash(self, signal: dict, stage: str, available_methods: list[str] | None) -> str:
+    def _llm_stage_hash(
+        self,
+        signal: dict,
+        stage: str,
+        available_methods: list[str] | None,
+        *,
+        analysis_mode: str = "triage",
+    ) -> str:
         payload = {
             "stage": stage,
+            "analysis_mode": analysis_mode,
             "signal_type": signal.get("signal_type"),
             "endpoint": signal.get("endpoint"),
             "priority": signal.get("priority"),
@@ -643,10 +799,12 @@ class DeepHunter:
             "available_methods": available_methods[:6] if isinstance(available_methods, list) else [],
             "findings": signal.get("findings", [])[-4:],
         }
+        if analysis_mode == "investigation_verification":
+            payload["investigation_summary"] = signal.get("investigation_summary", {})
         normalized = json.dumps(payload, ensure_ascii=False, sort_keys=True)
         return hashlib.sha1(normalized.encode("utf-8")).hexdigest()
 
-    def _record_llm_usage(self, signal: dict, stage: str, response) -> None:
+    def _record_llm_usage(self, signal: dict, stage: str, response, *, analysis_mode: str = "triage") -> None:
         self.llm_usage_events.append(
             {
                 "time": datetime.now(timezone.utc).isoformat(),
@@ -654,6 +812,7 @@ class DeepHunter:
                 "signal_type": signal.get("signal_type"),
                 "endpoint": signal.get("endpoint"),
                 "stage": stage,
+                "analysis_mode": analysis_mode,
                 "backend": getattr(response, "backend", "fallback"),
                 "model": getattr(response, "model", ""),
                 "fallback_used": bool(getattr(response, "fallback_used", False)),
@@ -1131,6 +1290,24 @@ class DeepHunter:
 
         return int(response_bytes) >= 100
 
+    def _normalize_alignment_score(self, value) -> float:
+        try:
+            score = float(value)
+        except (TypeError, ValueError):
+            score = 0.5
+        if score > 1.0:
+            score /= 10.0
+        return max(0.0, min(1.0, score))
+
+    def _normalize_verification_delta(self, value) -> float:
+        try:
+            delta = float(value)
+        except (TypeError, ValueError):
+            delta = 0.0
+        if abs(delta) > 1.0:
+            delta /= 10.0
+        return max(-0.5, min(0.5, delta))
+
     def _build_markdown(self, summary: DeepHuntSummary) -> str:
         lines: list[str] = []
         lines.append("# Deep Hunt")
@@ -1167,6 +1344,26 @@ class DeepHunter:
                 lines.append("")
                 for item in findings[:8]:
                     lines.append(f"- `{item}`")
+                lines.append("")
+            investigation_summary = signal.get("investigation_summary", {})
+            if isinstance(investigation_summary, dict) and investigation_summary:
+                lines.append("**Investigation Synthesis**")
+                lines.append("")
+                lines.append(f"- **Recommended Focus:** `{investigation_summary.get('recommended_focus', '')}`")
+                lines.append(f"- **Exploitability Summary:** `{investigation_summary.get('exploitability_summary', '')}`")
+                lines.append(f"- **Strongest Evidence:** `{investigation_summary.get('strongest_evidence', [])}`")
+                lines.append(f"- **Missing Evidence:** `{investigation_summary.get('missing_evidence', [])}`")
+                lines.append(f"- **Contradictions:** `{investigation_summary.get('contradiction_flags', [])}`")
+                lines.append("")
+            investigation_verification = signal.get("investigation_verification", {})
+            if isinstance(investigation_verification, dict) and investigation_verification:
+                lines.append("**Investigation Verification**")
+                lines.append("")
+                lines.append(f"- **Reviewer Disposition:** `{investigation_verification.get('reviewer_disposition', '')}`")
+                lines.append(f"- **Evidence Alignment:** `{investigation_verification.get('evidence_alignment_score', '')}`")
+                lines.append(f"- **Verified Observations:** `{investigation_verification.get('verified_observations', [])}`")
+                lines.append(f"- **Unsupported Claims:** `{investigation_verification.get('unsupported_claims', [])}`")
+                lines.append(f"- **Reasoning Risks:** `{investigation_verification.get('reasoning_risks', [])}`")
                 lines.append("")
             report_section = signal.get("report_section", {})
             if isinstance(report_section, dict) and report_section:
