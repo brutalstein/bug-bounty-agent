@@ -59,6 +59,7 @@ def command_doctor(_: argparse.Namespace) -> int:
         PROJECT_ROOT / "core" / "llm_client.py",
         PROJECT_ROOT / "core" / "request_budget.py",
         PROJECT_ROOT / "core" / "strategy_memory.py",
+        PROJECT_ROOT / "core" / "strategy_intelligence.py",
         PROJECT_ROOT / "tools" / "tool_runner.py",
         PROJECT_ROOT / "tools" / "recon_tools.py",
         PROJECT_ROOT / "tools" / "crawl_tools.py",
@@ -168,6 +169,7 @@ def command_interactive(args: argparse.Namespace) -> int:
         print_info(f"Latest decision: {last['decision']}")
         print_info(f"Latest next focus: {last['next_cycle_focus']}")
         print_info(f"Latest strategy pack: {last['recommended_strategy_pack']}")
+        print_info(f"Latest strategy source: {last['strategy_source']}")
         if last.get("manual_approval_recommended"):
             print_info(f"Manual approval next step: {last.get('manual_approval_command')}")
 

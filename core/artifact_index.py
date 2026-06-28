@@ -46,6 +46,7 @@ class ArtifactIndexBuilder:
         signals = self._read_json(self.parsed_dir / "signals.json")
         deep_hunt = self._read_json(self.parsed_dir / "deep_hunt.json")
         autonomous_decision = self._read_json(self.parsed_dir / "autonomous_decision.json")
+        strategy_intelligence = self._read_json(self.parsed_dir / "strategy_intelligence.json")
         llm_usage = self._read_json(self.parsed_dir / "llm_usage.json")
         artifact_refresh_state = self._read_json(self.parsed_dir / "artifact_refresh_state.json")
         request_budget = self._read_json(self.parsed_dir / "request_budget.json")
@@ -77,6 +78,7 @@ class ArtifactIndexBuilder:
                 self.reports_dir / "signals.md",
                 self.reports_dir / "deep_hunt.md",
                 self.reports_dir / "autonomous_decision.md",
+                self.reports_dir / "strategy_intelligence.md",
                 self.reports_dir / "agent_summary.md",
                 self.reports_dir / "evidence_pack.md",
                 self.reports_dir / "final_report_draft.md",
@@ -108,6 +110,7 @@ class ArtifactIndexBuilder:
                 self.parsed_dir / "signals.json",
                 self.parsed_dir / "deep_hunt.json",
                 self.parsed_dir / "autonomous_decision.json",
+                self.parsed_dir / "strategy_intelligence.json",
                 self.parsed_dir / "deep_hunt_strategy.json",
                 self.parsed_dir / "llm_usage.json",
                 self.parsed_dir / "llm_traces.jsonl",
@@ -156,6 +159,7 @@ class ArtifactIndexBuilder:
             signals=signals,
             deep_hunt=deep_hunt,
             autonomous_decision=autonomous_decision,
+            strategy_intelligence=strategy_intelligence,
             llm_usage=llm_usage,
             artifact_refresh_state=artifact_refresh_state,
             request_budget=request_budget,
@@ -188,6 +192,7 @@ class ArtifactIndexBuilder:
         signals: dict,
         deep_hunt: dict,
         autonomous_decision: dict,
+        strategy_intelligence: dict,
         llm_usage: dict,
         artifact_refresh_state: dict,
         request_budget: dict,
@@ -260,8 +265,13 @@ class ArtifactIndexBuilder:
             lines.append(f"- **Boundary Hotspots:** `{autonomous_decision.get('boundary_hotspot_count', 0)}`")
             lines.append(f"- **Autonomous Strategy Pack:** `{autonomous_decision.get('recommended_strategy_pack', '')}`")
             lines.append(f"- **Autonomous Signal Type:** `{autonomous_decision.get('recommended_signal_type', '')}`")
+            lines.append(f"- **Autonomous Strategy Source:** `{autonomous_decision.get('strategy_source', '')}`")
+            lines.append(f"- **Autonomous Strategy Support Runs:** `{autonomous_decision.get('strategy_support_runs', 0)}`")
             if autonomous_decision.get("manual_approval_recommended"):
                 lines.append(f"- **Manual Approval Next Step:** `{autonomous_decision.get('manual_approval_command', '')}`")
+        if strategy_intelligence:
+            lines.append(f"- **Learned Strategy Overrides:** `{strategy_intelligence.get('recommended_packs', {})}`")
+            lines.append(f"- **Strategy Runs Considered:** `{strategy_intelligence.get('recent_run_count', 0)}`")
         if request_budget:
             lines.append(f"- **Request Budget Used:** `{request_budget.get('total_requests', 0)}` / `{request_budget.get('total_request_limit', 0)}`")
             lines.append(f"- **Request Budget Stop Reason:** `{request_budget.get('stop_reason', '')}`")
@@ -317,6 +327,7 @@ class ArtifactIndexBuilder:
         lines.append(f"- `reports/signals.md` {'(present)' if (self.reports_dir / 'signals.md').exists() else '(missing)' }")
         lines.append(f"- `reports/deep_hunt.md` {'(present)' if (self.reports_dir / 'deep_hunt.md').exists() else '(missing)' }")
         lines.append(f"- `reports/autonomous_decision.md` {'(present)' if (self.reports_dir / 'autonomous_decision.md').exists() else '(missing)' }")
+        lines.append(f"- `reports/strategy_intelligence.md` {'(present)' if (self.reports_dir / 'strategy_intelligence.md').exists() else '(missing)' }")
         lines.append(f"- `reports/agent_summary.md` {'(present)' if (self.reports_dir / 'agent_summary.md').exists() else '(missing)' }")
         lines.append(f"- `reports/evidence_pack.md` {'(present)' if (self.reports_dir / 'evidence_pack.md').exists() else '(missing)' }")
         lines.append(f"- `reports/final_report_draft.md` {'(present)' if (self.reports_dir / 'final_report_draft.md').exists() else '(missing)' }")

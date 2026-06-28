@@ -8,6 +8,8 @@ from pathlib import Path
 from urllib.parse import urlparse
 import json
 
+from core.strategy_intelligence import StrategyIntelligenceAnalyzer
+
 
 @dataclass
 class BoundaryHotspot:
@@ -38,6 +40,8 @@ class AutonomousDecisionSummary:
     recommended_strategy_pack: str
     recommended_signal_type: str
     recommended_method_sequence: list[str]
+    strategy_source: str
+    strategy_support_runs: int
     recommended_targets: list[str]
     strongest_hotspots: list[dict]
     rationale: list[str]
@@ -64,6 +68,7 @@ class AutonomousDecisionEngine:
         session_compare = self._read_json(self.parsed_dir / "session_compare.json")
         review_queue = self._read_json(self.parsed_dir / "review_queue.json")
         final_report = self._read_json(self.parsed_dir / "final_report_draft.json")
+        strategy_intelligence = StrategyIntelligenceAnalyzer(self.run_dir).build()
 
         hotspots = self._collect_hotspots(signals=signals, deep_hunt=deep_hunt, session_compare=session_compare)
         recommended_targets = self._recommended_targets(hotspots)
@@ -84,6 +89,8 @@ class AutonomousDecisionEngine:
         recommended_strategy_pack = "surface_expansion_baseline"
         recommended_signal_type = ""
         recommended_method_sequence: list[str] = []
+        strategy_source = "focus_default"
+        strategy_support_runs = 0
         rationale: list[str] = []
 
         strongest_hotspot = hotspots[0] if hotspots else None
@@ -187,6 +194,18 @@ class AutonomousDecisionEngine:
         else:
             rationale.append("No meaningful boundary or exposure signals were found in the current run.")
 
+        (
+            recommended_strategy_pack,
+            recommended_method_sequence,
+            strategy_source,
+            strategy_support_runs,
+        ) = self._apply_strategy_learning(
+            next_cycle_focus=next_cycle_focus,
+            recommended_strategy_pack=recommended_strategy_pack,
+            recommended_method_sequence=recommended_method_sequence,
+            strategy_intelligence=strategy_intelligence,
+        )
+
         summary = AutonomousDecisionSummary(
             target=str(run_data.get("target_url", "unknown")),
             profile_name=str(run_data.get("profile_name", "unknown")),
@@ -203,6 +222,8 @@ class AutonomousDecisionEngine:
             recommended_strategy_pack=recommended_strategy_pack,
             recommended_signal_type=recommended_signal_type,
             recommended_method_sequence=recommended_method_sequence,
+            strategy_source=strategy_source,
+            strategy_support_runs=strategy_support_runs,
             recommended_targets=recommended_targets,
             strongest_hotspots=[item.to_dict() for item in hotspots[:5]],
             rationale=rationale,
@@ -340,6 +361,63 @@ class AutonomousDecisionEngine:
         hotspots.sort(key=lambda item: (-item.score, item.signal_type, item.endpoint))
         return hotspots
 
+    def _apply_strategy_learning(
+        self,
+        *,
+        next_cycle_focus: str,
+        recommended_strategy_pack: str,
+        recommended_method_sequence: list[str],
+        strategy_intelligence,
+    ) -> tuple[str, list[str], str, int]:
+        compatible_packs = {
+            "boundary_hotspot_recon": {"boundary_cache_auth_investigator", "session_boundary_mapper"},
+            "session_boundary_recon": {"session_boundary_mapper", "boundary_cache_auth_investigator"},
+            "api_boundary_recon": {"api_surface_correlator", "boundary_cache_auth_investigator"},
+            "developer_surface_recon": {"developer_surface_expander", "api_surface_correlator"},
+        }
+        recommended_packs = getattr(strategy_intelligence, "recommended_packs", {}) or {}
+        recommended_methods = getattr(strategy_intelligence, "recommended_methods", {}) or {}
+
+        selected_pack = recommended_strategy_pack
+        selected_methods = list(recommended_method_sequence)
+        strategy_source = "focus_default"
+        support_runs = 0
+
+        learned_pack = str(recommended_packs.get(next_cycle_focus, "")).strip()
+        if learned_pack and learned_pack in compatible_packs.get(next_cycle_focus, {learned_pack}):
+            selected_pack = learned_pack
+            strategy_source = "learned_recent_runs"
+            support_runs = self._strategy_pack_support(strategy_intelligence, next_cycle_focus, learned_pack)
+
+        learned_methods = [
+            str(item).strip()
+            for item in recommended_methods.get(next_cycle_focus, [])
+            if str(item).strip()
+        ]
+        if learned_methods:
+            merged: list[str] = []
+            seen: set[str] = set()
+            for method in learned_methods + selected_methods:
+                if method in seen:
+                    continue
+                merged.append(method)
+                seen.add(method)
+            selected_methods = merged
+            if strategy_source == "focus_default":
+                strategy_source = "learned_method_bias"
+                support_runs = max(support_runs, 1)
+
+        return selected_pack, selected_methods, strategy_source, support_runs
+
+    def _strategy_pack_support(self, strategy_intelligence, focus: str, strategy_pack: str) -> int:
+        pack_scores = getattr(strategy_intelligence, "pack_scores", []) or []
+        for item in pack_scores:
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("focus", "")) == focus and str(item.get("strategy_pack", "")) == strategy_pack:
+                return int(item.get("runs", 0))
+        return 0
+
     def _top_signal_type(self, signals: dict) -> str:
         for item in signals.get("signals", []):
             if not isinstance(item, dict):
@@ -416,6 +494,8 @@ class AutonomousDecisionEngine:
         lines.append(f"- **Strategy Pack:** `{summary.recommended_strategy_pack}`")
         lines.append(f"- **Recommended Signal Type:** `{summary.recommended_signal_type}`")
         lines.append(f"- **Recommended Method Sequence:** `{summary.recommended_method_sequence}`")
+        lines.append(f"- **Strategy Source:** `{summary.strategy_source}`")
+        lines.append(f"- **Strategy Support Runs:** `{summary.strategy_support_runs}`")
         lines.append("")
         if summary.rationale:
             lines.append("## Rationale")
