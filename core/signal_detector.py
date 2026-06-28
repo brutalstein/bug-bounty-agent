@@ -450,6 +450,8 @@ class SignalDetector:
                             "matched_rule": "session_compare_access_boundary_changed",
                             "review_signal": str(item.get("review_signal", "")),
                             "notes": item.get("notes", []),
+                            "variant_signal_score": int(item.get("variant_signal_score", 0)),
+                            "variant_findings": item.get("variant_findings", []),
                         },
                     )
                 )

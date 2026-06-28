@@ -36,12 +36,18 @@ METHODS_BY_SIGNAL_TYPE = {
         "safe_reprobe_get",
     ],
     "AUTH_BYPASS": [
+        "session_boundary_evidence_review",
+        "readonly_variant_matrix_review",
+        "cache_auth_boundary_investigator",
         "cross_surface_context_review",
         "context_from_ranked_candidates",
         "safe_reprobe_get",
         "header_policy_review",
     ],
     "SENSITIVE_DATA": [
+        "session_boundary_evidence_review",
+        "cache_auth_boundary_investigator",
+        "readonly_variant_matrix_review",
         "response_shape_review",
         "route_family_neighbor_review",
         "safe_reprobe_get",
@@ -55,10 +61,20 @@ METHODS_BY_SIGNAL_TYPE = {
     ],
     "JWT_ISSUES": ["js_context_review", "cross_surface_context_review", "context_from_ranked_candidates"],
     "SSRF_CANDIDATE": ["js_context_review", "route_family_neighbor_review", "redirect_behavior_review"],
-    "CORS_MISCONFIG": ["header_policy_review", "cross_surface_context_review", "safe_reprobe_get"],
-    "INFO_DISCLOSURE": ["response_shape_review", "route_family_neighbor_review", "safe_reprobe_get"],
+    "CORS_MISCONFIG": ["cache_auth_boundary_investigator", "header_policy_review", "cross_surface_context_review", "safe_reprobe_get"],
+    "INFO_DISCLOSURE": [
+        "session_boundary_evidence_review",
+        "cache_auth_boundary_investigator",
+        "readonly_variant_matrix_review",
+        "response_shape_review",
+        "route_family_neighbor_review",
+        "safe_reprobe_get",
+    ],
     "OPEN_REDIRECT": ["redirect_behavior_review", "js_context_review", "cross_surface_context_review"],
     "BROKEN_ACCESS_CONTROL": [
+        "session_boundary_evidence_review",
+        "readonly_variant_matrix_review",
+        "cache_auth_boundary_investigator",
         "cross_surface_context_review",
         "route_family_neighbor_review",
         "context_from_ranked_candidates",
@@ -108,8 +124,10 @@ class DeepHunter:
         self.endpoint_validation = self._read_json(self.parsed_dir / "endpoint_validation.json")
         self.js_analysis = self._read_json(self.parsed_dir / "js_analysis.json")
         self.ranked_candidates = self._read_json(self.parsed_dir / "ranked_candidates.json")
+        self.session_compare = self._read_json(self.parsed_dir / "session_compare.json")
         self.endpoint_validation_by_url = self._index_endpoint_validation(self.endpoint_validation)
         self.ranked_candidates_by_target = self._index_ranked_candidates(self.ranked_candidates)
+        self.session_compare_by_url = self._index_session_compare(self.session_compare)
         self.llm_backend = current_llm_backend("signal_analysis")
         self.llm_review_budget_used = 0
         self.llm_review_budget_limit = 0
@@ -295,7 +313,17 @@ class DeepHunter:
 
     def _methods_for_signal(self, signal: dict) -> list[str]:
         signal_type = str(signal.get("signal_type", "")).upper()
-        candidates = METHODS_BY_SIGNAL_TYPE.get(signal_type, ["context_from_ranked_candidates"])
+        candidates = list(METHODS_BY_SIGNAL_TYPE.get(signal_type, ["context_from_ranked_candidates"]))
+        if not self._has_strong_session_boundary_context(signal):
+            candidates = [
+                item
+                for item in candidates
+                if item not in {
+                    "session_boundary_evidence_review",
+                    "cache_auth_boundary_investigator",
+                    "readonly_variant_matrix_review",
+                }
+            ]
         return self.strategy_memory.choose_method_order(
             signal_key=self._signal_key(signal),
             signal_type=signal_type,
@@ -678,6 +706,137 @@ class DeepHunter:
             signal["confidence"] = max(0.1, float(signal.get("confidence", 0.0)) - 0.01)
         return signal
 
+    def _method_session_boundary_evidence_review(self, signal: dict) -> dict:
+        item = self._strongest_session_compare_item(str(signal.get("endpoint", "")))
+        if not item:
+            signal["findings"].append(
+                {
+                    "kind": "session_boundary_evidence_review",
+                    "message": "No strong session-compare artifact matched this endpoint or route family.",
+                }
+            )
+            signal["confidence"] = max(0.1, float(signal.get("confidence", 0.0)) - 0.01)
+            return signal
+
+        variant_score = int(item.get("variant_signal_score", 0))
+        finding = {
+            "kind": "session_boundary_evidence_review",
+            "compare_id": str(item.get("compare_id", "")),
+            "variant_signal_score": variant_score,
+            "review_signal": str(item.get("review_signal", "")),
+            "variant_findings": item.get("variant_findings", []),
+            "accessibility_changed": bool(item.get("accessibility_changed")),
+            "auth_requirement_changed": bool(item.get("auth_requirement_changed")),
+            "sensitive_indicators_added": item.get("sensitive_indicators_added", []),
+            "write_methods_exposed": item.get("write_methods_exposed", []),
+            "method_observation_count": len(item.get("method_observations", []))
+            if isinstance(item.get("method_observations", []), list)
+            else 0,
+        }
+        signal["findings"].append(finding)
+
+        signal_type = str(signal.get("signal_type", "")).upper()
+        delta = 0.02
+        if signal_type in {"AUTH_BYPASS", "BROKEN_ACCESS_CONTROL"}:
+            if item.get("accessibility_changed") is True or item.get("auth_requirement_changed") is True:
+                delta = 0.1 if variant_score >= 5 else 0.07
+        elif signal_type == "SENSITIVE_DATA":
+            if item.get("sensitive_indicators_added") and variant_score >= 4:
+                delta = 0.09
+        elif signal_type == "INFO_DISCLOSURE":
+            if variant_score >= 5:
+                delta = 0.07
+        signal["confidence"] = min(0.95, float(signal.get("confidence", 0.0)) + delta)
+        return signal
+
+    def _method_cache_auth_boundary_investigator(self, signal: dict) -> dict:
+        item = self._strongest_session_compare_item(str(signal.get("endpoint", "")))
+        if not item:
+            signal["findings"].append(
+                {
+                    "kind": "cache_auth_boundary_investigator",
+                    "message": "No session-compare cache or auth-boundary evidence was available.",
+                }
+            )
+            signal["confidence"] = max(0.1, float(signal.get("confidence", 0.0)) - 0.01)
+            return signal
+
+        high_risk_cache_boundary = bool(
+            item.get("cache_validator_reused") is True
+            or item.get("auth_vary_missing") is True
+            or (
+                item.get("cache_policy_changed") is True
+                and (
+                    int(item.get("auth_auth_cookie_count", 0)) > 0
+                    or int(item.get("unauth_auth_cookie_count", 0)) > 0
+                )
+            )
+        )
+        signal["findings"].append(
+            {
+                "kind": "cache_auth_boundary_investigator",
+                "cache_validator_reused": bool(item.get("cache_validator_reused")),
+                "auth_vary_missing": bool(item.get("auth_vary_missing")),
+                "cache_policy_changed": bool(item.get("cache_policy_changed")),
+                "vary_changed": bool(item.get("vary_changed")),
+                "cors_policy_changed": bool(item.get("cors_policy_changed")),
+                "high_risk_cache_boundary": high_risk_cache_boundary,
+                "variant_findings": item.get("variant_findings", []),
+            }
+        )
+
+        signal_type = str(signal.get("signal_type", "")).upper()
+        if high_risk_cache_boundary:
+            delta = 0.08 if signal_type in {"SENSITIVE_DATA", "INFO_DISCLOSURE"} else 0.05
+            signal["confidence"] = min(0.95, float(signal.get("confidence", 0.0)) + delta)
+        else:
+            signal["confidence"] = max(0.1, float(signal.get("confidence", 0.0)) - 0.005)
+        return signal
+
+    def _method_readonly_variant_matrix_review(self, signal: dict) -> dict:
+        item = self._strongest_session_compare_item(str(signal.get("endpoint", "")))
+        if not item:
+            signal["findings"].append(
+                {
+                    "kind": "readonly_variant_matrix_review",
+                    "message": "No read-only variant matrix was available for this endpoint.",
+                }
+            )
+            signal["confidence"] = max(0.1, float(signal.get("confidence", 0.0)) - 0.01)
+            return signal
+
+        observations = item.get("method_observations", [])
+        if not isinstance(observations, list):
+            observations = []
+        compact_observations = [
+            {
+                "label": obs.get("label"),
+                "method": obs.get("method"),
+                "auth_mode": obs.get("auth_mode"),
+                "status_code": obs.get("status_code"),
+                "allow_header": obs.get("allow_header"),
+                "vary": obs.get("vary"),
+            }
+            for obs in observations[:8]
+            if isinstance(obs, dict)
+        ]
+        signal["findings"].append(
+            {
+                "kind": "readonly_variant_matrix_review",
+                "representation_changed": bool(item.get("representation_changed")),
+                "method_exposure_changed": bool(item.get("method_exposure_changed")),
+                "write_methods_exposed": item.get("write_methods_exposed", []),
+                "variant_signal_score": int(item.get("variant_signal_score", 0)),
+                "observations": compact_observations,
+            }
+        )
+
+        if item.get("method_exposure_changed") is True or item.get("representation_changed") is True:
+            signal["confidence"] = min(0.95, float(signal.get("confidence", 0.0)) + 0.06)
+        else:
+            signal["confidence"] = max(0.1, float(signal.get("confidence", 0.0)) - 0.005)
+        return signal
+
     def _interesting_headers(self, headers: dict[str, str]) -> dict[str, str]:
         keys = [
             "access-control-allow-origin",
@@ -710,6 +869,17 @@ class DeepHunter:
             if signal_type == "SENSITIVE_DATA" and item.get("sensitive_indicators"):
                 return True
 
+            if signal_type in {"AUTH_BYPASS", "BROKEN_ACCESS_CONTROL"}:
+                if (
+                    item.get("kind") == "session_boundary_evidence_review"
+                    and int(item.get("variant_signal_score", 0)) >= 5
+                    and (
+                        item.get("accessibility_changed") is True
+                        or item.get("auth_requirement_changed") is True
+                    )
+                ):
+                    return True
+
             if signal_type in {"AUTH_BYPASS", "ADMIN_EXPOSURE", "IDOR"}:
                 if self._supports_access_control_hypothesis(
                     status_code=item.get("status_code"),
@@ -730,6 +900,18 @@ class DeepHunter:
             if signal_type == "INFO_DISCLOSURE":
                 status_code = item.get("status_code")
                 if isinstance(status_code, int) and status_code >= 500:
+                    return True
+                if (
+                    item.get("kind") == "cache_auth_boundary_investigator"
+                    and item.get("high_risk_cache_boundary") is True
+                ):
+                    return True
+
+            if signal_type == "SENSITIVE_DATA":
+                if (
+                    item.get("kind") == "cache_auth_boundary_investigator"
+                    and item.get("high_risk_cache_boundary") is True
+                ):
                     return True
 
         return False
@@ -839,6 +1021,79 @@ class DeepHunter:
             for item in items
             if isinstance(item, dict) and str(item.get("target", "")).strip()
         }
+
+    def _index_session_compare(self, data: dict) -> dict[str, list[dict]]:
+        items = data.get("items", []) if isinstance(data, dict) else []
+        if not isinstance(items, list):
+            return {}
+
+        indexed: dict[str, list[dict]] = {}
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            url = str(item.get("url", "")).strip()
+            if not url:
+                continue
+            indexed.setdefault(url, []).append(item)
+        return indexed
+
+    def _related_session_compare_items(self, endpoint: str) -> list[dict]:
+        endpoint = str(endpoint).strip()
+        if not endpoint:
+            return []
+
+        matches: list[dict] = []
+        for item in self.session_compare_by_url.get(endpoint, []):
+            if isinstance(item, dict):
+                matches.append(item)
+
+        endpoint_family = self._endpoint_family(endpoint)
+        if endpoint_family:
+            for url, items in self.session_compare_by_url.items():
+                if url == endpoint or self._endpoint_family(url) != endpoint_family:
+                    continue
+                for item in items:
+                    if isinstance(item, dict):
+                        matches.append(item)
+
+        deduped: list[dict] = []
+        seen_ids: set[str] = set()
+        for item in sorted(
+            matches,
+            key=lambda payload: (
+                -int(payload.get("variant_signal_score", 0)),
+                -(1 if payload.get("accessibility_changed") else 0),
+                -(1 if payload.get("auth_requirement_changed") else 0),
+                -(1 if payload.get("cache_validator_reused") else 0),
+            ),
+        ):
+            compare_id = str(item.get("compare_id", ""))
+            if compare_id and compare_id in seen_ids:
+                continue
+            if compare_id:
+                seen_ids.add(compare_id)
+            deduped.append(item)
+        return deduped
+
+    def _strongest_session_compare_item(self, endpoint: str) -> dict | None:
+        matches = self._related_session_compare_items(endpoint)
+        return matches[0] if matches else None
+
+    def _has_strong_session_boundary_context(self, signal: dict) -> bool:
+        endpoint = str(signal.get("endpoint", "")).strip()
+        evidence = signal.get("evidence", {}) if isinstance(signal.get("evidence", {}), dict) else {}
+        if int(evidence.get("variant_signal_score", 0)) >= 4:
+            return True
+        item = self._strongest_session_compare_item(endpoint)
+        if not item:
+            return False
+        return bool(
+            int(item.get("variant_signal_score", 0)) >= 4
+            or item.get("accessibility_changed") is True
+            or item.get("auth_requirement_changed") is True
+            or item.get("cache_validator_reused") is True
+            or item.get("auth_vary_missing") is True
+        )
 
     def _endpoint_family(self, endpoint: str) -> str:
         if not endpoint:

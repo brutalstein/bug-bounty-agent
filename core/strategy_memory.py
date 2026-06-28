@@ -59,6 +59,13 @@ class StrategyMemory:
                 score += 0.2
             if signal_type.upper() in {"INFO_DISCLOSURE", "SENSITIVE_DATA"} and "response" in method:
                 score += 0.2
+            if signal_type.upper() in {"AUTH_BYPASS", "BROKEN_ACCESS_CONTROL", "SENSITIVE_DATA", "INFO_DISCLOSURE"}:
+                if "boundary" in method:
+                    score += 0.3
+                if "cache" in method:
+                    score += 0.25
+                if "variant" in method:
+                    score += 0.2
 
             scored.append((score, method))
 
