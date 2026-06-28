@@ -37,6 +37,7 @@ def command_doctor(_: argparse.Namespace) -> int:
         PROJECT_ROOT / "core" / "report_generator.py",
         PROJECT_ROOT / "core" / "artifact_index.py",
         PROJECT_ROOT / "core" / "autonomous_agent.py",
+        PROJECT_ROOT / "core" / "autonomous_decision.py",
         PROJECT_ROOT / "core" / "session_signals.py",
         PROJECT_ROOT / "core" / "session_surface_compare.py",
         PROJECT_ROOT / "core" / "auth_session.py",
@@ -164,6 +165,10 @@ def command_interactive(args: argparse.Namespace) -> int:
         last = summary.run_evaluations[-1]
         print_info(f"Latest run directory: {last['run_dir']}")
         print_info(f"Latest dashboard: {last['dashboard_path']}")
+        print_info(f"Latest decision: {last['decision']}")
+        print_info(f"Latest next focus: {last['next_cycle_focus']}")
+        if last.get("manual_approval_recommended"):
+            print_info(f"Manual approval next step: {last.get('manual_approval_command')}")
 
     return 0
 

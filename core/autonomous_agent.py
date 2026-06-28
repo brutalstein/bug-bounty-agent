@@ -25,6 +25,7 @@ from app.workflows.internal import (
     run_signals_internal,
     run_surface_recon_internal,
 )
+from core.autonomous_decision import AutonomousDecisionEngine
 from core.console import print_status
 from core.http_client import SafeHttpClient
 from core.lab_manager import LabManager
@@ -65,6 +66,12 @@ class RunEvaluation:
     flow_name: str
     potential_high_signal: bool
     stop_reason: str
+    decision: str
+    next_cycle_focus: str
+    highest_priority_target: str
+    boundary_hotspot_count: int
+    manual_approval_recommended: bool
+    manual_approval_command: str
     review_queue_start_now: int
     review_queue_manual_review: int
     final_report_items: int
@@ -248,7 +255,14 @@ class AutonomousAgent:
         evaluations: list[RunEvaluation] = []
         stop_reason = "safe_budget_exhausted_without_high_signal_candidate"
 
-        for index, plan in enumerate(cycle_plans, start=1):
+        pending_plans = list(cycle_plans)
+        used_targets: list[str] = []
+
+        while pending_plans and len(evaluations) < max_cycles:
+            next_plan = self._select_next_plan(pending_plans, evaluations)
+            pending_plans = [item for item in pending_plans if item is not next_plan]
+            plan = next_plan
+            index = len(evaluations) + 1
             print_status("step", f"Cycle {index}/{len(cycle_plans)}: {plan['label']}")
             self._record_state(
                 state_name="PASSIVE_RECON" if plan["flow_name"] == "surface-recon" else "SAFE_DEEP_HUNT",
@@ -272,6 +286,7 @@ class AutonomousAgent:
 
             evaluation = self.evaluate_run(run_dir, plan["flow_name"])
             evaluations.append(evaluation)
+            used_targets.extend(str(item) for item in plan.get("targets", []) if str(item).strip())
             self._print_run_evaluation(evaluation)
             self.write_agent_summary(run_dir, evaluations, selected.profile_name, selected_target)
             self.write_agent_state_trace(run_dir)
@@ -291,6 +306,10 @@ class AutonomousAgent:
             if evaluation.potential_high_signal:
                 stop_reason = evaluation.stop_reason
                 break
+
+            decision_plan = self._decision_driven_plan(scope, evaluation, used_targets)
+            if decision_plan is not None:
+                pending_plans.insert(0, decision_plan)
 
         if evaluations and not evaluations[-1].potential_high_signal:
             stop_reason = evaluations[-1].stop_reason
@@ -586,6 +605,7 @@ class AutonomousAgent:
         deep_hunt = self._read_json(parsed_dir / "deep_hunt.json")
         review_queue = self._read_json(parsed_dir / "review_queue.json")
         final_report = self._read_json(parsed_dir / "final_report_draft.json")
+        decision_summary = AutonomousDecisionEngine(run_dir).build()
 
         signal_items = signals.get("signals", []) if isinstance(signals, dict) else []
         if not isinstance(signal_items, list):
@@ -608,25 +628,12 @@ class AutonomousAgent:
         deep_hunt_escalated = int(deep_hunt.get("escalated_count", 0))
         signals_high_or_critical = int(signals.get("critical_count", 0)) + int(signals.get("high_count", 0))
 
-        potential_high_signal = any(
-            [
-                deep_hunt_escalated > 0,
-                final_report_candidates > 0,
-            ]
+        potential_high_signal = bool(
+            decision_summary.should_stop
+            or deep_hunt_escalated > 0
+            or final_report_candidates > 0
         )
-
-        if deep_hunt_escalated > 0:
-            stop_reason = "escalated_signal_ready_for_human_review"
-        elif final_report_candidates > 0:
-            stop_reason = "final_report_candidate_ready_for_human_review"
-        elif review_queue_start_now > 0:
-            stop_reason = "review_queue_contains_start_now_items_but_needs_more_signal"
-        elif signals_high_or_critical > 0:
-            stop_reason = "high_signal_detected_but_not_yet_escalated"
-        elif int(signals.get("total_signals", 0)) > 0:
-            stop_reason = "signals_detected_but_low_priority"
-        else:
-            stop_reason = "no_meaningful_signal_detected_in_safe_budget"
+        stop_reason = decision_summary.stop_reason
 
         return RunEvaluation(
             run_dir=str(run_dir),
@@ -634,6 +641,12 @@ class AutonomousAgent:
             flow_name=flow_name,
             potential_high_signal=potential_high_signal,
             stop_reason=stop_reason,
+            decision=decision_summary.decision,
+            next_cycle_focus=decision_summary.next_cycle_focus,
+            highest_priority_target=decision_summary.highest_priority_target,
+            boundary_hotspot_count=decision_summary.boundary_hotspot_count,
+            manual_approval_recommended=decision_summary.manual_approval_recommended,
+            manual_approval_command=decision_summary.manual_approval_command,
             review_queue_start_now=review_queue_start_now,
             review_queue_manual_review=int(review_queue.get("manual_review_count", 0)),
             final_report_items=int(final_report.get("report_draft_items", 0)),
@@ -688,6 +701,10 @@ class AutonomousAgent:
             lines.append(f"- **Run Directory:** `{evaluation.run_dir}`")
             lines.append(f"- **Dashboard:** `{evaluation.dashboard_path}`")
             lines.append(f"- **Potential High Signal:** `{evaluation.potential_high_signal}`")
+            lines.append(f"- **Decision:** `{evaluation.decision}`")
+            lines.append(f"- **Next Cycle Focus:** `{evaluation.next_cycle_focus}`")
+            lines.append(f"- **Boundary Hotspots:** `{evaluation.boundary_hotspot_count}`")
+            lines.append(f"- **Highest Priority Target:** `{evaluation.highest_priority_target}`")
             lines.append(f"- **Review Queue Start Now:** `{evaluation.review_queue_start_now}`")
             lines.append(f"- **Manual Review Items:** `{evaluation.review_queue_manual_review}`")
             lines.append(f"- **Final Report Candidates:** `{evaluation.final_report_candidates}`")
@@ -695,6 +712,8 @@ class AutonomousAgent:
             lines.append(f"- **High/Critical Signals:** `{evaluation.signals_high_or_critical}`")
             lines.append(f"- **Deep Hunt Escalated:** `{evaluation.deep_hunt_escalated}`")
             lines.append(f"- **Top Signal Types:** `{evaluation.top_signal_types}`")
+            if evaluation.manual_approval_recommended:
+                lines.append(f"- **Manual Approval Command:** `{evaluation.manual_approval_command}`")
             lines.append("")
         report_path.write_text("\n".join(lines), encoding="utf-8")
 
@@ -759,6 +778,104 @@ class AutonomousAgent:
         )
         if process.returncode != 0:
             raise RuntimeError(f"`{label}` failed with exit code {process.returncode}.")
+
+    def _select_next_plan(
+        self,
+        pending_plans: list[dict[str, Any]],
+        evaluations: list[RunEvaluation],
+    ) -> dict[str, Any]:
+        if not evaluations:
+            return pending_plans[0]
+
+        latest = evaluations[-1]
+        focus = latest.next_cycle_focus
+        ranked = sorted(
+            pending_plans,
+            key=lambda item: (
+                -self._plan_focus_score(item, focus, latest.highest_priority_target),
+                item.get("label", ""),
+            ),
+        )
+        return ranked[0]
+
+    def _plan_focus_score(self, plan: dict[str, Any], focus: str, highest_priority_target: str) -> int:
+        label = str(plan.get("label", "")).lower()
+        targets = [str(item).lower() for item in plan.get("targets", []) if str(item).strip()]
+        score = 0
+
+        if highest_priority_target and any(highest_priority_target.lower() in item for item in targets):
+            score += 5
+        if focus == "boundary_hotspot_recon":
+            if "session-boundary" in label:
+                score += 4
+            if any("login" in item or "auth" in item or "api" in item for item in targets):
+                score += 3
+        elif focus == "api_boundary_recon":
+            if "api-first" in label:
+                score += 4
+            if any("api" in item or "meta" in item or "graphql" in item for item in targets):
+                score += 3
+        elif focus == "developer_surface_recon":
+            if "developer-surface" in label:
+                score += 4
+            if any("developers" in item or "openapi" in item or "swagger" in item for item in targets):
+                score += 3
+        elif focus == "session_boundary_recon":
+            if "session-boundary" in label:
+                score += 4
+        return score
+
+    def _decision_driven_plan(
+        self,
+        scope: ScopeManager,
+        evaluation: RunEvaluation,
+        used_targets: list[str],
+    ) -> dict[str, Any] | None:
+        if evaluation.next_cycle_focus != "boundary_hotspot_recon":
+            return None
+        if evaluation.boundary_hotspot_count <= 0:
+            return None
+
+        candidate_targets = self._decision_targets_from_run(Path(evaluation.run_dir), scope)
+        filtered_targets: list[str] = []
+        for target in candidate_targets:
+            normalized = str(target).strip()
+            if not normalized or normalized in filtered_targets:
+                continue
+            if normalized in used_targets:
+                continue
+            if not scope.is_target_allowed(normalized):
+                continue
+            filtered_targets.append(normalized)
+            if len(filtered_targets) >= 3:
+                break
+
+        if len(filtered_targets) < 2:
+            return None
+
+        return {
+            "flow_name": "surface-recon",
+            "label": "Decision-driven boundary hotspot recon",
+            "argv": [
+                "surface-recon",
+                "--profile",
+                scope.config.profile_name,
+                *filtered_targets,
+            ],
+            "execution": "internal_surface_recon",
+            "targets": filtered_targets,
+            "follow_ups": [
+                {"label": "Signal detection refresh", "kind": "signals"},
+                {"label": "Policy-safe deep hunt refresh", "kind": "deep_hunt"},
+            ],
+        }
+
+    def _decision_targets_from_run(self, run_dir: Path, scope: ScopeManager) -> list[str]:
+        decision = self._read_json(run_dir / "parsed" / "autonomous_decision.json")
+        targets = decision.get("recommended_targets", []) if isinstance(decision, dict) else []
+        if not isinstance(targets, list):
+            return []
+        return [str(item).strip() for item in targets if str(item).strip() and scope.is_target_allowed(str(item).strip())]
 
     def execute_plan(self, plan: dict[str, Any]) -> None:
         if plan.get("execution") == "internal_surface_recon":
@@ -916,6 +1033,11 @@ class AutonomousAgent:
         print_status("info", f"Signals total: {evaluation.signals_total}")
         print_status("info", f"High/Critical signals: {evaluation.signals_high_or_critical}")
         print_status("info", f"Deep hunt escalated: {evaluation.deep_hunt_escalated}")
+        print_status("info", f"Decision: {evaluation.decision}")
+        print_status("info", f"Next cycle focus: {evaluation.next_cycle_focus}")
+        print_status("info", f"Boundary hotspots: {evaluation.boundary_hotspot_count}")
+        if evaluation.manual_approval_recommended:
+            print_status("warn", f"Manual approval next step: {evaluation.manual_approval_command}")
         print_status("info", f"Top signal types: {evaluation.top_signal_types or ['none']}")
         print_status("info", f"Stop reason: {evaluation.stop_reason}")
 
