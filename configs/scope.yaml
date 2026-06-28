@@ -54,6 +54,9 @@ profiles:
       program_url: "https://owasp.org/www-project-juice-shop/"
       policy_reviewed_at: "2026-06-27"
       policy_max_age_days: 365
+      interpretation_mode: "lab_flexible"
+      allow_automated_readonly_recon: true
+      require_explicit_allow_for_risky_actions: false
       allowed_http_methods:
         - "GET"
         - "HEAD"
@@ -155,6 +158,9 @@ profiles:
       program_url: "https://hackerone.com/airtable"
       policy_reviewed_at: "2026-06-25"
       policy_max_age_days: 30
+      interpretation_mode: "permissive_readonly_explicit_risky"
+      allow_automated_readonly_recon: true
+      require_explicit_allow_for_risky_actions: true
       allowed_http_methods:
         - "GET"
         - "HEAD"
@@ -175,7 +181,8 @@ profiles:
         - "Official Airtable security.txt references the public HackerOne bug bounty program."
         - "Airtable HackerOne scope page reviewed on June 25, 2026 lists staging.airtable.com, api-staging.airtable.com, mcp.staging.airtable.com, airtable.js, @airtable/mcp-cli, and wildcard *.staging.airtable.com in scope."
         - "The same scope page explicitly warns not to test production airtable.com and to use endpointUrl https://api-staging.airtable.com for API testing."
-        - "This profile is still restricted to low-rate, read-only probing. Only explicitly listed hosts from the wildcard family are enabled here; no wildcard host enumeration, no active scan, and no port scan are enabled."
+        - "Passive low-rate read-only automation is allowed here as an operator policy interpretation because the program guidance does not forbid safe scanner-assisted recon, but raw scanner output alone is not treated as a valid report."
+        - "Only explicitly listed hosts from the wildcard family are enabled here; no wildcard host enumeration, no active scan, and no port scan are enabled."
         - "Read-only browser evidence and browser-based public-surface comparison are allowed only with explicit manual approval."
       priority_categories:
         - "potential_auth_bypass"

@@ -8,6 +8,7 @@ import re
 
 from core.scope import ScopeManager
 from core.run_context import RunContext
+from core.console import print_verbose
 from tools.tool_runner import ToolRunner
 
 
@@ -56,7 +57,7 @@ class ProjectDiscoveryTools:
         self.parsed_dir = Path(run_context.parsed_dir)
 
     def run_httpx(self, target: str, timeout_seconds: int = 60) -> ProjectDiscoveryRunResult:
-        self.scope.assert_action_allowed(target, method="GET")
+        self.scope.assert_readonly_operation_allowed(target, "httpx", method="GET")
 
         command = [
             "httpx",
@@ -71,8 +72,9 @@ class ProjectDiscoveryTools:
             output_name="pd_httpx",
             timeout_seconds=timeout_seconds,
         )
+        print_verbose(f"httpx -> target={target} timeout={timeout_seconds}s")
 
-        return self._build_result(
+        result = self._build_result(
             tool_name="httpx",
             target=target,
             command=command,
@@ -81,6 +83,10 @@ class ProjectDiscoveryTools:
             error=tool_result.error or tool_result.stderr,
             output_name="pd_httpx_outputs.json",
         )
+        print_verbose(
+            f"httpx <- success={result.success} in_scope={result.in_scope_output_count} blocked={result.blocked_output_count}"
+        )
+        return result
 
     def run_katana(
         self,
@@ -88,7 +94,7 @@ class ProjectDiscoveryTools:
         depth: int = 1,
         timeout_seconds: int = 120,
     ) -> ProjectDiscoveryRunResult:
-        self.scope.assert_action_allowed(target, method="GET")
+        self.scope.assert_readonly_operation_allowed(target, "katana", method="GET")
 
         if not self.scope.is_lab_profile():
             raise PermissionError("Katana is currently enabled only in lab mode.")
@@ -110,8 +116,9 @@ class ProjectDiscoveryTools:
             output_name="pd_katana",
             timeout_seconds=timeout_seconds,
         )
+        print_verbose(f"katana -> target={target} depth={depth} timeout={timeout_seconds}s")
 
-        return self._build_result(
+        result = self._build_result(
             tool_name="katana",
             target=target,
             command=command,
@@ -120,6 +127,10 @@ class ProjectDiscoveryTools:
             error=tool_result.error or tool_result.stderr,
             output_name="pd_katana_outputs.json",
         )
+        print_verbose(
+            f"katana <- success={result.success} raw={result.raw_output_count} in_scope={result.in_scope_output_count}"
+        )
+        return result
 
     def run_nuclei(
         self,
@@ -129,7 +140,7 @@ class ProjectDiscoveryTools:
         rate_limit: int = 10,
         timeout_seconds: int = 30,
     ) -> NucleiRunResult:
-        self.scope.assert_action_allowed(target, method="GET")
+        self.scope.assert_readonly_operation_allowed(target, "nuclei", method="GET")
 
         if not self.scope.is_lab_profile():
             raise PermissionError("Nuclei is currently enabled only in lab mode.")
@@ -172,6 +183,9 @@ class ProjectDiscoveryTools:
             command=command,
             output_name="pd_nuclei",
             timeout_seconds=timeout_seconds,
+        )
+        print_verbose(
+            f"nuclei -> target={target} severities={severities} rate_limit={rate_limit}/min template={template_path.name}"
         )
 
         findings = self._parse_jsonl(tool_result.stdout)
@@ -240,6 +254,9 @@ class ProjectDiscoveryTools:
             event_type="nuclei_completed",
             message="Nuclei execution completed.",
             data=result.to_dict(),
+        )
+        print_verbose(
+            f"nuclei <- success={result.success} findings={result.in_scope_findings} blocked={result.blocked_findings}"
         )
 
         return result

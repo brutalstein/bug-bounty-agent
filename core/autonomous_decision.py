@@ -8,6 +8,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 import json
 
+from core.hypothesis_engine import HypothesisLedgerBuilder
 from core.strategy_intelligence import StrategyIntelligenceAnalyzer
 
 
@@ -72,6 +73,7 @@ class AutonomousDecisionEngine:
         signals = self._read_json(self.parsed_dir / "signals.json")
         deep_hunt = self._read_json(self.parsed_dir / "deep_hunt.json")
         session_compare = self._read_json(self.parsed_dir / "session_compare.json")
+        hypothesis_ledger = HypothesisLedgerBuilder(self.run_dir).build().to_dict()
         review_queue = self._read_json(self.parsed_dir / "review_queue.json")
         final_report = self._read_json(self.parsed_dir / "final_report_draft.json")
         intelligence_warnings: list[str] = []
@@ -93,6 +95,12 @@ class AutonomousDecisionEngine:
         )
         review_queue_start_now = int(review_queue.get("start_now_count", 0))
         boundary_hotspot_count = len(hotspots)
+        unresolved_hypotheses = [
+            item
+            for item in hypothesis_ledger.get("hypotheses", [])
+            if isinstance(item, dict) and item.get("unresolved") is True and item.get("exhausted") is not True
+        ]
+        top_hypothesis = unresolved_hypotheses[0] if unresolved_hypotheses else None
         next_cycle_focus = "continue_passive_surface_expansion"
         focus_source = "decision_default"
         focus_support_runs = 0
@@ -168,6 +176,21 @@ class AutonomousDecisionEngine:
                 "cross_surface_context_review",
             ]
             rationale.append("Strongest current leads are boundary/cache/auth drift hotspots.")
+        elif top_hypothesis is not None:
+            decision = "continue_with_hypothesis_focus"
+            stop_reason = "unresolved_readonly_hypotheses_remain"
+            should_stop = False
+            next_cycle_focus = str(top_hypothesis.get("next_focus", "")).strip() or "session_boundary_recon"
+            recommended_strategy_pack = self._strategy_pack_for_focus(next_cycle_focus)
+            recommended_signal_type = str(top_hypothesis.get("signal_type", "")).strip() or top_signal_type
+            recommended_method_sequence = [
+                str(item).strip()
+                for item in top_hypothesis.get("suggested_methods", [])
+                if str(item).strip()
+            ]
+            recommended_targets = [str(top_hypothesis.get("endpoint", "")).strip()] + recommended_targets
+            recommended_targets = [item for item in dict.fromkeys(recommended_targets) if item]
+            rationale.append("Unresolved read-only hypotheses remain even though hotspot thresholds were not crossed.")
         elif review_queue_start_now > 0:
             decision = "continue_with_surface_expansion"
             stop_reason = "review_queue_contains_start_now_items_but_needs_more_signal"
@@ -401,6 +424,16 @@ class AutonomousDecisionEngine:
 
         hotspots.sort(key=lambda item: (-item.score, item.signal_type, item.endpoint))
         return hotspots
+
+    def _strategy_pack_for_focus(self, focus: str) -> str:
+        mapping = {
+            "boundary_hotspot_recon": "boundary_cache_auth_investigator",
+            "session_boundary_recon": "session_boundary_mapper",
+            "api_boundary_recon": "api_surface_correlator",
+            "developer_surface_recon": "developer_surface_expander",
+            "manual_auth_diff": "manual_auth_boundary_diff",
+        }
+        return mapping.get(str(focus).strip(), "surface_expansion_baseline")
 
     def _apply_focus_learning(
         self,

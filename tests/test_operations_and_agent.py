@@ -75,7 +75,9 @@ def test_reporting_refresh_writes_state_file(tmp_path):
     state = json.loads((run_dir / "parsed" / "artifact_refresh_state.json").read_text(encoding="utf-8"))
     assert summary["mode"] == "reporting"
     assert state["mode"] == "reporting"
-    assert state["stages_run"] == ["report", "dashboard"]
+    assert state["stages_run"] == ["hypotheses", "report", "dashboard"]
+    assert (run_dir / "parsed" / "hypothesis_ledger.json").exists()
+    assert (run_dir / "reports" / "hypothesis_ledger.md").exists()
 
 
 def test_agent_state_trace_writing(tmp_path):

@@ -21,6 +21,7 @@ from core.deep_hunter import DeepHunter
 from core.evidence_pack import EvidencePackBuilder
 from core.final_report import FinalReportComposer
 from core.findings import FindingNormalizer
+from core.hypothesis_engine import HypothesisLedgerBuilder
 from core.ranking import CandidateRanker
 from core.report_generator import ReportGenerator
 from core.review_queue import ReviewQueueBuilder
@@ -88,6 +89,10 @@ def refresh_run_artifacts(run_dir: str | Path, *, mode: str = "full") -> dict:
             }
         )
 
+    hypothesis_builder = HypothesisLedgerBuilder(target_run_dir)
+    hypothesis_summary = run_step("Refreshing hypothesis ledger", hypothesis_builder.build, "Hypothesis ledger updated")
+    stages_run.append("hypotheses")
+
     generator = ReportGenerator(target_run_dir)
     report_path = run_step("Generating general report", generator.generate, "General report generated")
     stages_run.append("report")
@@ -98,6 +103,9 @@ def refresh_run_artifacts(run_dir: str | Path, *, mode: str = "full") -> dict:
 
     summary.update(
         {
+            "hypotheses_count": hypothesis_summary.hypothesis_count,
+            "hypotheses_unresolved": hypothesis_summary.unresolved_count,
+            "hypotheses_path": hypothesis_summary.markdown_path,
             "report_path": str(report_path),
             "dashboard_path": index_summary.index_markdown_path,
             "stages_run": stages_run,
@@ -179,6 +187,8 @@ def command_signals_run(args: argparse.Namespace) -> int:
     print_info(f"High: {summary.high_count}")
     print_info(f"Medium: {summary.medium_count}")
     print_info(f"Low: {summary.low_count}")
+    print_info(f"Hypotheses: {refresh_summary['hypotheses_count']}")
+    print_info(f"Unresolved hypotheses: {refresh_summary['hypotheses_unresolved']}")
     print_info(f"JSON: {summary.signals_json_path}")
     print_info(f"Markdown: {summary.signals_markdown_path}")
     print_info(f"General report: {refresh_summary['report_path']}")
@@ -206,6 +216,7 @@ def command_deep_hunt(args: argparse.Namespace) -> int:
 
     detector = SignalDetector(run_dir)
     signal_summary = run_step("Refreshing vulnerability signals", detector.detect, "Signals refreshed")
+    run_step("Refreshing hypothesis ledger", HypothesisLedgerBuilder(run_dir).build, "Hypothesis ledger updated")
 
     hunter = DeepHunter(scope=scope, run_context=ctx)
     deep_summary = run_step(
@@ -226,6 +237,7 @@ def command_deep_hunt(args: argparse.Namespace) -> int:
     print_info(f"Escalated: {deep_summary.escalated_count}")
     print_info(f"Ruled out: {deep_summary.ruled_out_count}")
     print_info(f"Read-only requests used: {deep_summary.total_request_count}")
+    print_info(f"Unresolved hypotheses: {refresh_summary['hypotheses_unresolved']}")
     print_info(f"JSON: {deep_summary.deep_hunt_json_path}")
     print_info(f"Markdown: {deep_summary.deep_hunt_markdown_path}")
     print_info(f"General report: {refresh_summary['report_path']}")

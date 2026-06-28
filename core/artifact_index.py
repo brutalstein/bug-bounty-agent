@@ -45,6 +45,7 @@ class ArtifactIndexBuilder:
         session_compare = self._read_json(self.parsed_dir / "session_compare.json")
         signals = self._read_json(self.parsed_dir / "signals.json")
         deep_hunt = self._read_json(self.parsed_dir / "deep_hunt.json")
+        hypothesis_ledger = self._read_json(self.parsed_dir / "hypothesis_ledger.json")
         autonomous_decision = self._read_json(self.parsed_dir / "autonomous_decision.json")
         strategy_intelligence = self._read_json(self.parsed_dir / "strategy_intelligence.json")
         llm_usage = self._read_json(self.parsed_dir / "llm_usage.json")
@@ -77,6 +78,7 @@ class ArtifactIndexBuilder:
                 self.reports_dir / "session_compare.md",
                 self.reports_dir / "signals.md",
                 self.reports_dir / "deep_hunt.md",
+                self.reports_dir / "hypothesis_ledger.md",
                 self.reports_dir / "autonomous_decision.md",
                 self.reports_dir / "strategy_intelligence.md",
                 self.reports_dir / "agent_summary.md",
@@ -109,6 +111,7 @@ class ArtifactIndexBuilder:
                 self.parsed_dir / "session_compare.json",
                 self.parsed_dir / "signals.json",
                 self.parsed_dir / "deep_hunt.json",
+                self.parsed_dir / "hypothesis_ledger.json",
                 self.parsed_dir / "autonomous_decision.json",
                 self.parsed_dir / "strategy_intelligence.json",
                 self.parsed_dir / "deep_hunt_strategy.json",
@@ -158,6 +161,7 @@ class ArtifactIndexBuilder:
             session_compare=session_compare,
             signals=signals,
             deep_hunt=deep_hunt,
+            hypothesis_ledger=hypothesis_ledger,
             autonomous_decision=autonomous_decision,
             strategy_intelligence=strategy_intelligence,
             llm_usage=llm_usage,
@@ -191,6 +195,7 @@ class ArtifactIndexBuilder:
         session_compare: dict,
         signals: dict,
         deep_hunt: dict,
+        hypothesis_ledger: dict,
         autonomous_decision: dict,
         strategy_intelligence: dict,
         llm_usage: dict,
@@ -259,6 +264,10 @@ class ArtifactIndexBuilder:
             lines.append(f"- **High Signals:** `{signals.get('high_count', 0)}`")
         if deep_hunt:
             lines.append(f"- **Deep Hunt Investigated:** `{deep_hunt.get('investigated_count', 0)}`")
+        if hypothesis_ledger:
+            lines.append(f"- **Hypotheses:** `{hypothesis_ledger.get('hypothesis_count', 0)}`")
+            lines.append(f"- **Unresolved Hypotheses:** `{hypothesis_ledger.get('unresolved_count', 0)}`")
+            lines.append(f"- **Top Hypothesis Focus:** `{hypothesis_ledger.get('top_hypothesis_focus', '')}`")
         if autonomous_decision:
             lines.append(f"- **Autonomous Decision:** `{autonomous_decision.get('decision', '')}`")
             lines.append(f"- **Autonomous Next Focus:** `{autonomous_decision.get('next_cycle_focus', '')}`")
@@ -332,6 +341,7 @@ class ArtifactIndexBuilder:
         lines.append(f"- `reports/session_compare.md` {'(present)' if (self.reports_dir / 'session_compare.md').exists() else '(missing)' }")
         lines.append(f"- `reports/signals.md` {'(present)' if (self.reports_dir / 'signals.md').exists() else '(missing)' }")
         lines.append(f"- `reports/deep_hunt.md` {'(present)' if (self.reports_dir / 'deep_hunt.md').exists() else '(missing)' }")
+        lines.append(f"- `reports/hypothesis_ledger.md` {'(present)' if (self.reports_dir / 'hypothesis_ledger.md').exists() else '(missing)' }")
         lines.append(f"- `reports/autonomous_decision.md` {'(present)' if (self.reports_dir / 'autonomous_decision.md').exists() else '(missing)' }")
         lines.append(f"- `reports/strategy_intelligence.md` {'(present)' if (self.reports_dir / 'strategy_intelligence.md').exists() else '(missing)' }")
         lines.append(f"- `reports/agent_summary.md` {'(present)' if (self.reports_dir / 'agent_summary.md').exists() else '(missing)' }")

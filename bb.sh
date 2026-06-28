@@ -11,6 +11,7 @@ PLAYWRIGHT_SKIP="${BB_SKIP_BROWSER_SETUP:-0}"
 CLI_QUIET=0
 DEFAULT_PROFILE=""
 DEFAULT_COMMAND=""
+export BB_VERBOSE_STEPS="${BB_VERBOSE_STEPS:-1}"
 
 supports_color() {
   [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]
@@ -231,10 +232,12 @@ main() {
       --quiet)
         CLI_QUIET=1
         export BB_CLI_MINIMAL=1
+        export BB_VERBOSE_STEPS=0
         shift
         ;;
       --verbose)
         export BB_VERBOSE_LOGS=1
+        export BB_VERBOSE_STEPS=1
         shift
         ;;
       --no-browser-setup)

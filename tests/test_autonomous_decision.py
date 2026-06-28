@@ -158,3 +158,85 @@ def test_autonomous_decision_stops_for_manual_approval_threshold(tmp_path):
     assert summary.recommended_signal_type == "SENSITIVE_DATA"
     assert summary.exploration_pack in {"", "boundary_cache_auth_investigator"}
     assert "session-compare-run" in summary.manual_approval_command
+
+
+def test_autonomous_decision_uses_unresolved_hypothesis_when_hotspots_are_weak(tmp_path):
+    run_dir = tmp_path / "run-3"
+    parsed_dir = run_dir / "parsed"
+    reports_dir = run_dir / "reports"
+    parsed_dir.mkdir(parents=True)
+    reports_dir.mkdir(parents=True)
+
+    (run_dir / "run.json").write_text(
+        json.dumps(
+            {
+                "target_url": "https://staging.airtable.com",
+                "profile_name": "airtable-staging-public-h1",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (parsed_dir / "signals.json").write_text(
+        json.dumps(
+            {
+                "high_count": 0,
+                "critical_count": 0,
+                "total_signals": 1,
+                "signals": [
+                    {
+                        "signal_type": "BROKEN_ACCESS_CONTROL",
+                        "endpoint": "https://api-staging.airtable.com/v0/meta/tables",
+                        "priority": "MEDIUM",
+                        "confidence": 0.52,
+                        "evidence": {"matched_rule": "session_compare_access_boundary_changed"},
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (parsed_dir / "deep_hunt.json").write_text(
+        json.dumps(
+            {
+                "escalated_count": 0,
+                "signals": [
+                    {
+                        "signal_type": "BROKEN_ACCESS_CONTROL",
+                        "endpoint": "https://api-staging.airtable.com/v0/meta/tables",
+                        "status": "pending",
+                        "methods_tried": ["session_boundary_evidence_review"],
+                        "findings": [{"kind": "session_boundary_evidence_review"}],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (parsed_dir / "session_compare.json").write_text(
+        json.dumps(
+            {
+                "items": [
+                    {
+                        "url": "https://api-staging.airtable.com/v0/meta/tables",
+                        "variant_signal_score": 0,
+                        "accessibility_changed": False,
+                        "auth_requirement_changed": False,
+                        "cache_validator_reused": False,
+                        "auth_vary_missing": False,
+                        "representation_changed": False,
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    (parsed_dir / "review_queue.json").write_text(json.dumps({"start_now_count": 0}), encoding="utf-8")
+    (parsed_dir / "final_report_draft.json").write_text(json.dumps({"candidate_items": 0}), encoding="utf-8")
+
+    summary = AutonomousDecisionEngine(run_dir).build()
+
+    assert summary.decision == "continue_with_hypothesis_focus"
+    assert summary.stop_reason == "unresolved_readonly_hypotheses_remain"
+    assert summary.next_cycle_focus in {"boundary_hotspot_recon", "session_boundary_recon", "api_boundary_recon"}
+    assert summary.recommended_signal_type == "BROKEN_ACCESS_CONTROL"
+    assert summary.recommended_method_sequence

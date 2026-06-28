@@ -9,6 +9,7 @@ import json
 import re
 
 from core.http_client import SafeHttpClient
+from core.console import print_verbose
 from core.redactor import EvidenceRedactor
 from core.run_context import RunContext
 from core.scope import ScopeManager
@@ -113,9 +114,10 @@ class HighValueReconRunner:
         seen_routes: set[str] = set()
 
         for origin in origins:
+            print_verbose(f"high_value_recon -> origin={origin} probes={len(PROBE_DEFINITIONS)}")
             for probe in PROBE_DEFINITIONS:
                 url = urljoin(origin.rstrip("/") + "/", probe["path"].lstrip("/"))
-                self.scope.assert_action_allowed(url, method="GET")
+                self.scope.assert_readonly_operation_allowed(url, f"high_value_recon:{probe['kind']}", method="GET")
                 response = self.client.get(url)
                 body = response.body or ""
                 extracted_routes = self._extract_routes(
@@ -138,6 +140,10 @@ class HighValueReconRunner:
                 )
                 results.append(item)
                 self._add_route_candidates(route_candidates, seen_routes, item)
+            interesting_now = sum(1 for item in results if item.interesting)
+            print_verbose(
+                f"high_value_recon <- origin={origin} tested={len([item for item in results if item.origin == origin])} interesting={interesting_now} routes={len(route_candidates)}"
+            )
 
         summary = HighValueReconSummary(
             target=self.ctx.target_url,

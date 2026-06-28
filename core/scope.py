@@ -40,6 +40,9 @@ class PolicyConfig:
     program_url: str
     policy_reviewed_at: str
     policy_max_age_days: int
+    interpretation_mode: str
+    allow_automated_readonly_recon: bool
+    require_explicit_allow_for_risky_actions: bool
     allowed_http_methods: list[str]
     requires_manual_approval_for: list[str]
     disallowed_actions: list[str]
@@ -287,6 +290,18 @@ class ScopeManager:
                 program_url=str(policy.get("program_url", "")),
                 policy_reviewed_at=str(policy.get("policy_reviewed_at", "")).strip(),
                 policy_max_age_days=max(int(policy.get("policy_max_age_days", 30)), 1),
+                interpretation_mode=str(
+                    policy.get(
+                        "interpretation_mode",
+                        "lab_flexible" if str(authorization.get("kind", "")) == "local_lab" else "explicit_only",
+                    )
+                ).strip(),
+                allow_automated_readonly_recon=bool(
+                    policy.get("allow_automated_readonly_recon", self._default_readonly_automation(authorization, target))
+                ),
+                require_explicit_allow_for_risky_actions=bool(
+                    policy.get("require_explicit_allow_for_risky_actions", True)
+                ),
                 allowed_http_methods=[str(item).upper() for item in allowed_methods],
                 requires_manual_approval_for=[
                     str(item) for item in policy.get("requires_manual_approval_for", [])
@@ -427,6 +442,29 @@ class ScopeManager:
         normalized_method = method.upper().strip()
         return normalized_method in self.config.policy.allowed_http_methods
 
+    def allows_readonly_automation(self) -> bool:
+        if self.is_lab_profile():
+            return True
+
+        disallowed = {
+            item.strip().lower()
+            for item in self.config.policy.disallowed_actions
+        }
+        if "automated_scanning" in disallowed or "automated_readonly_recon" in disallowed:
+            return False
+
+        return bool(self.config.policy.allow_automated_readonly_recon)
+
+    def requires_explicit_allow_for_risky_actions(self) -> bool:
+        return bool(self.config.policy.require_explicit_allow_for_risky_actions)
+
+    def policy_operating_model(self) -> dict:
+        return {
+            "interpretation_mode": self.config.policy.interpretation_mode,
+            "readonly_automation_allowed": self.allows_readonly_automation(),
+            "risky_actions_require_explicit_allow": self.requires_explicit_allow_for_risky_actions(),
+        }
+
     def is_authorization_confirmed(self) -> bool:
         return self.config.authorization.confirmed
 
@@ -515,6 +553,7 @@ class ScopeManager:
             "policy_reviewed_at": self.config.policy.policy_reviewed_at,
             "policy_max_age_days": self.config.policy.policy_max_age_days,
             "policy_status": self.policy_status(),
+            "policy_operating_model": self.policy_operating_model(),
             "method": method.upper(),
             "method_allowed": method_allowed,
             "allowed_http_methods": self.config.policy.allowed_http_methods,
@@ -533,6 +572,7 @@ class ScopeManager:
             "policy_reviewed_at": self.config.policy.policy_reviewed_at,
             "policy_max_age_days": self.config.policy.policy_max_age_days,
             "policy_status": self.policy_status(),
+            "policy_operating_model": self.policy_operating_model(),
             "authorization": {
                 "kind": self.config.authorization.kind,
                 "confirmed": self.config.authorization.confirmed,
@@ -550,6 +590,18 @@ class ScopeManager:
             "session_profiles": self.list_session_profiles(),
             "allow_port_scan": self.config.rules.allow_port_scan,
         }
+
+    def assert_readonly_operation_allowed(
+        self,
+        target: str,
+        capability: str,
+        method: str = "GET",
+    ) -> None:
+        self.assert_action_allowed(target, method=method)
+        if not self.allows_readonly_automation():
+            raise PermissionError(
+                f"Read-only automated operation is not allowed by policy interpretation for `{self.config.profile_name}`: {capability}"
+            )
 
     def policy_status(self, now: date | datetime | None = None) -> dict:
         current_date = self._normalize_policy_date(now) or datetime.now(timezone.utc).date()
@@ -641,6 +693,11 @@ class ScopeManager:
     def assert_action_allowed(self, target: str, method: str = "GET") -> None:
         self.assert_allowed(target)
         self.assert_authorized(method=method)
+
+    def _default_readonly_automation(self, authorization: dict, target: dict) -> bool:
+        if str(authorization.get("kind", "")).strip() == "local_lab":
+            return True
+        return str(target.get("type", "")).strip() == "bug-bounty-program"
 
 
 if __name__ == "__main__":

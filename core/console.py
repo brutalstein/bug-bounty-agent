@@ -29,6 +29,7 @@ SYMBOLS = {
     "blocked": "■",
     "review": "◆",
     "artifact": "◈",
+    "tool": "⚙",
 }
 
 SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
@@ -77,11 +78,22 @@ def print_status(kind: str, message: str, stream=None) -> None:
         "blocked": ("red", SYMBOLS["blocked"], "BLOCKED"),
         "review": ("yellow", SYMBOLS["review"], "REVIEW"),
         "artifact": ("blue", SYMBOLS["artifact"], "ARTIFACT"),
+        "tool": ("blue", SYMBOLS["tool"], "TOOL"),
     }
 
     color, symbol, label = token_map.get(kind, ("muted", "•", "LOG"))
     prefix = f"{style(symbol, color, 'bold', stream=stream)} {style(label, color, 'bold', stream=stream)}"
     print(f"{prefix} {message}", file=stream)
+
+
+def verbose_enabled() -> bool:
+    return os.getenv("BB_VERBOSE_STEPS", "1") == "1" or os.getenv("BB_VERBOSE_LOGS") == "1"
+
+
+def print_verbose(message: str, stream=None) -> None:
+    if not verbose_enabled():
+        return
+    print_status("tool", message, stream=stream)
 
 
 def print_banner(title: str, subtitle: str = "") -> None:

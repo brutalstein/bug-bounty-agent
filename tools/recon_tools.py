@@ -6,6 +6,7 @@ import json
 import re
 
 from core.http_client import SafeHttpClient
+from core.console import print_verbose
 from core.scope import ScopeManager
 from core.run_context import RunContext
 from core.session_signals import SessionSignalAnalyzer
@@ -43,8 +44,9 @@ class ReconTools:
         self.client = SafeHttpClient()
 
     def http_probe(self, target: str, timeout_seconds: int = 10) -> HttpProbeResult:
-        self.scope.assert_action_allowed(target, method="GET")
+        self.scope.assert_readonly_operation_allowed(target, "http_probe", method="GET")
         self.client.timeout_seconds = timeout_seconds
+        print_verbose(f"http_probe -> GET {target} | timeout={timeout_seconds}s")
         response = self.client.get(target)
 
         if response.body:
@@ -76,6 +78,9 @@ class ReconTools:
             event_type="http_probe_completed",
             message="HTTP probe completed successfully.",
             data=result.to_dict(),
+        )
+        print_verbose(
+            f"http_probe <- status={result.status_code} cookies={result.set_cookie_count} session_issues={result.session_signal_issue_count} success={result.success}"
         )
         return result
 

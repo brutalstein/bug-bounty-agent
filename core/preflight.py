@@ -7,6 +7,7 @@ import json
 
 from core.http_client import SafeHttpClient
 from core.scope import ScopeManager
+from core.console import print_verbose
 
 
 @dataclass
@@ -44,7 +45,14 @@ class PreflightChecker:
 
     def run(self, target: str, method: str = "GET") -> PreflightCheck:
         explanation = self.scope.explain(target, method=method)
+        self.scope.assert_readonly_operation_allowed(explanation["normalized_url"], "preflight_probe", method=method)
+        print_verbose(
+            f"preflight -> {method.upper()} {explanation['normalized_url']} | mode={explanation['policy_operating_model']['interpretation_mode']}"
+        )
         response = self.client.get(explanation["normalized_url"])
+        print_verbose(
+            f"preflight <- status={response.status_code} success={response.success} reachable={response.status_code is not None}"
+        )
 
         blocking_issues: list[str] = []
         warnings: list[str] = []

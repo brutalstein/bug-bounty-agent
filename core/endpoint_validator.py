@@ -8,6 +8,7 @@ import json
 import re
 
 from core.http_client import SafeHttpClient
+from core.console import print_verbose
 from core.scope import ScopeManager
 from core.run_context import RunContext
 from core.redactor import EvidenceRedactor
@@ -73,6 +74,7 @@ class EndpointValidator:
 
     def validate_from_run(self, max_endpoints: int = 60) -> EndpointValidationSummary:
         candidates = self._collect_endpoint_candidates()
+        print_verbose(f"endpoint_validator -> candidates={len(candidates)} max_endpoints={max_endpoints}")
 
         results: list[dict] = []
         skipped: list[dict] = []
@@ -149,6 +151,9 @@ class EndpointValidator:
                 "interesting_count": summary.interesting_count,
                 "exposure_likely_count": summary.exposure_likely_count,
             },
+        )
+        print_verbose(
+            f"endpoint_validator <- tested={summary.tested_count} accessible={summary.accessible_count} exposure={summary.exposure_likely_count}"
         )
 
         return summary

@@ -64,6 +64,15 @@ def test_method_policy_blocks_post_on_airtable():
     explanation = scope.explain("https://staging.airtable.com", method="POST")
     assert explanation["allowed"] is True
     assert explanation["method_allowed"] is False
+    assert explanation["policy_operating_model"]["risky_actions_require_explicit_allow"] is True
+
+
+def test_airtable_policy_mode_allows_readonly_automation():
+    scope = ScopeManager("configs/scope.yaml", profile_name="airtable-staging-public-h1")
+    assert scope.allows_readonly_automation() is True
+    model = scope.policy_operating_model()
+    assert model["interpretation_mode"] == "permissive_readonly_explicit_risky"
+    assert model["readonly_automation_allowed"] is True
 
 
 def test_manual_approval_gate_present():

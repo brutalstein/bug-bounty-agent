@@ -11,6 +11,7 @@ import json
 import time
 
 from core.http_client import SafeHttpClient
+from core.hypothesis_engine import HypothesisLedgerBuilder
 from core.llm_client import (
     analyze_signal,
     configure_trace_file,
@@ -137,6 +138,7 @@ class DeepHunter:
         self.strategy_memory = StrategyMemory(self.strategy_memory_path)
         self.passive_surface_diff = self._read_json(self.parsed_dir / "passive_surface_diff.json")
         self.session_surface_compare = self._read_json(self.parsed_dir / "session_surface_compare.json")
+        self.hypothesis_ledger = self._read_json(self.parsed_dir / "hypothesis_ledger.json")
 
     def run(
         self,
@@ -145,6 +147,7 @@ class DeepHunter:
         strategy_pack: str | None = None,
         preferred_methods: list[str] | None = None,
     ) -> DeepHuntSummary:
+        self.hypothesis_ledger = HypothesisLedgerBuilder(self.run_dir).build().to_dict()
         signal_data = self._read_json(self.parsed_dir / "signals.json")
         raw_signals = signal_data.get("signals", []) if isinstance(signal_data, dict) else []
         if not isinstance(raw_signals, list):
@@ -244,6 +247,12 @@ class DeepHunter:
         signal.setdefault("signal_id", f"{signal.get('signal_type', 'signal')}::{signal.get('endpoint', 'unknown')}")
         signal["strategy_pack"] = str(strategy_pack or signal.get("strategy_pack") or "").strip()
         signal["preferred_method_sequence"] = [str(item) for item in (preferred_methods or []) if str(item).strip()]
+        hypothesis = self._matching_hypothesis(signal)
+        if hypothesis:
+            signal["active_hypothesis_id"] = hypothesis.get("hypothesis_id", "")
+            signal["active_hypothesis_focus"] = hypothesis.get("next_focus", "")
+            signal["active_hypothesis_score"] = hypothesis.get("score", 0)
+            signal["active_hypothesis_methods"] = list(hypothesis.get("suggested_methods", []))
         iteration_count = 0
         started_at = time.monotonic()
 
@@ -357,6 +366,7 @@ class DeepHunter:
             endpoint_family=self._endpoint_family(str(signal.get("endpoint", ""))),
             available_methods=candidates,
         )
+        ordered = self._apply_hypothesis_methods(signal, ordered)
         return self._apply_strategy_preferences(
             ordered,
             strategy_pack=strategy_pack,
@@ -428,6 +438,57 @@ class DeepHunter:
                 "readonly_variant_matrix_review",
             ]
         return []
+
+    def _apply_hypothesis_methods(self, signal: dict, ordered_methods: list[str]) -> list[str]:
+        hypothesis = self._matching_hypothesis(signal)
+        if not hypothesis:
+            return ordered_methods
+
+        boosted: list[str] = []
+        seen: set[str] = set()
+        for method in hypothesis.get("suggested_methods", []):
+            normalized = str(method).strip()
+            if normalized and normalized in ordered_methods and normalized not in seen:
+                boosted.append(normalized)
+                seen.add(normalized)
+
+        for method in ordered_methods:
+            if method not in seen:
+                boosted.append(method)
+                seen.add(method)
+        return boosted
+
+    def _matching_hypothesis(self, signal: dict) -> dict | None:
+        hypotheses = self.hypothesis_ledger.get("hypotheses", []) if isinstance(self.hypothesis_ledger, dict) else []
+        if not isinstance(hypotheses, list):
+            return None
+
+        endpoint = str(signal.get("endpoint", "")).strip()
+        signal_type = str(signal.get("signal_type", "")).strip().upper()
+        endpoint_family = self._endpoint_family(endpoint)
+
+        for item in hypotheses:
+            if not isinstance(item, dict):
+                continue
+            if item.get("unresolved") is not True:
+                continue
+            if (
+                str(item.get("signal_type", "")).strip().upper() == signal_type
+                and str(item.get("endpoint", "")).strip() == endpoint
+            ):
+                return item
+
+        for item in hypotheses:
+            if not isinstance(item, dict):
+                continue
+            if item.get("unresolved") is not True:
+                continue
+            if (
+                str(item.get("signal_type", "")).strip().upper() == signal_type
+                and str(item.get("endpoint_family", "")).strip() == endpoint_family
+            ):
+                return item
+        return None
 
     def _select_next_method(self, signal: dict, available_methods: list[str]) -> str:
         if not self._should_use_llm(signal, stage="method_selection"):
