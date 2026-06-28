@@ -11,7 +11,8 @@ def test_llm_invalid_json_fallback(monkeypatch, tmp_path):
     trace_path = tmp_path / "llm_traces.jsonl"
     llm_client.configure_trace_file(trace_path)
     monkeypatch.setattr(llm_client, "_resolved_ollama_model_name", lambda: "qwen3:8b")
-    monkeypatch.setattr(llm_client, "_call_ollama", lambda prompt, task: "not-json")
+    monkeypatch.setattr(llm_client, "_resolved_ollama_model_name_for_task", lambda task: "qwen3:8b")
+    monkeypatch.setattr(llm_client, "_call_ollama", lambda prompt, task, model_name=None: "not-json")
 
     response = llm_client.analyze_signal(
         {
@@ -29,11 +30,16 @@ def test_llm_invalid_json_fallback(monkeypatch, tmp_path):
     assert trace_path.read_text(encoding="utf-8").strip()
 
 
-def test_redaction_before_llm(monkeypatch):
+def test_redaction_before_llm(monkeypatch, tmp_path):
     captured = {}
+    llm_client.configure_cache_dir(tmp_path / "llm-cache-redaction")
+    llm_client._LLM_CACHE.clear()  # noqa: SLF001
+    llm_client._LLM_CACHE_STORE.clear()  # noqa: SLF001
+    llm_client._LLM_CACHE_LOADED = False  # noqa: SLF001
 
-    def fake_call(prompt, task):
+    def fake_call(prompt, task, model_name=None):
         captured["prompt"] = prompt
+        captured["model_name"] = model_name
         return json.dumps(
             {
                 "confidence": 5,
@@ -45,6 +51,7 @@ def test_redaction_before_llm(monkeypatch):
         )
 
     monkeypatch.setattr(llm_client, "_resolved_ollama_model_name", lambda: "qwen3:8b")
+    monkeypatch.setattr(llm_client, "_resolved_ollama_model_name_for_task", lambda task: "qwen3:8b")
     monkeypatch.setattr(llm_client, "_call_ollama", fake_call)
 
     response = llm_client.analyze_signal(
@@ -64,6 +71,130 @@ def test_redaction_before_llm(monkeypatch):
     prompt = captured["prompt"]
     assert "super-secret-token" not in prompt
     assert "person@example.com" not in prompt
+    assert captured["model_name"] == "qwen3:8b"
+
+
+def test_report_section_uses_task_specific_ollama_model(monkeypatch, tmp_path):
+    monkeypatch.setattr(llm_client, "OPENAI_API_KEY", "")
+    monkeypatch.setattr(llm_client, "OLLAMA_MODEL", "qwen3:8b")
+    monkeypatch.setattr(llm_client, "OLLAMA_REPORT_MODEL", "llama3.1:8b")
+    llm_client.configure_cache_dir(tmp_path / "llm-cache-report")
+    llm_client._LLM_CACHE.clear()  # noqa: SLF001
+    llm_client._LLM_CACHE_STORE.clear()  # noqa: SLF001
+    llm_client._LLM_CACHE_LOADED = False  # noqa: SLF001
+    llm_client._OLLAMA_MODEL_CACHE.clear()  # noqa: SLF001
+
+    captured = {}
+
+    def fake_tags():
+        return [
+            {"name": "qwen3:8b"},
+            {"name": "llama3.1:8b"},
+        ]
+
+    def fake_call(prompt, task, model_name=None):
+        captured["task"] = task
+        captured["model_name"] = model_name
+        return json.dumps(
+            {
+                "title": "Potential Candidate",
+                "severity": "medium",
+                "description": "desc",
+                "steps_to_reproduce": ["step 1"],
+                "impact": "impact",
+                "remediation": "remediation",
+                "limitations": ["needs human review"],
+            }
+        )
+
+    monkeypatch.setattr(llm_client, "_fetch_ollama_tags", fake_tags)
+    monkeypatch.setattr(llm_client, "_call_ollama", fake_call)
+
+    response = llm_client.generate_report_section(
+        {
+            "signal_type": "INFO_DISCLOSURE",
+            "endpoint": "https://staging.airtable.com/login",
+            "confidence": 0.7,
+            "methods_tried": [],
+            "evidence": {"status_code": 500},
+        },
+        [],
+    )
+
+    assert response.fallback_used is False
+    assert captured["task"] == "report_section"
+    assert captured["model_name"] == "llama3.1:8b"
+
+
+def test_llm_persistent_cache_reuses_previous_response(monkeypatch, tmp_path):
+    trace_path = tmp_path / "llm_traces.jsonl"
+    cache_dir = tmp_path / "llm-cache"
+    llm_client.configure_trace_file(trace_path)
+    llm_client.configure_cache_dir(cache_dir)
+    llm_client._LLM_CACHE.clear()  # noqa: SLF001
+    llm_client._LLM_CACHE_STORE.clear()  # noqa: SLF001
+    llm_client._LLM_CACHE_LOADED = False  # noqa: SLF001
+
+    calls = {"count": 0}
+    llm_client._OLLAMA_MODEL_CACHE.clear()  # noqa: SLF001
+
+    def fake_call(prompt, task, model_name=None):
+        calls["count"] += 1
+        return json.dumps(
+            {
+                "confidence": 6,
+                "vuln_class": "INFO_DISCLOSURE",
+                "next_step": "safe_reprobe_get",
+                "report_ready": False,
+                "rationale": "cached",
+            }
+        )
+
+    monkeypatch.setattr(llm_client, "_resolved_ollama_model_name", lambda: "qwen3:8b")
+    monkeypatch.setattr(llm_client, "_resolved_ollama_model_name_for_task", lambda task: "qwen3:8b")
+    monkeypatch.setattr(llm_client, "_call_ollama", fake_call)
+
+    payload = {
+        "signal_type": "INFO_DISCLOSURE",
+        "endpoint": "https://staging.airtable.com/login",
+        "confidence": 0.6,
+        "methods_tried": [],
+        "evidence": {"status_code": 500},
+    }
+
+    first = llm_client.analyze_signal(payload)
+    assert first.cache_hit is False
+    assert calls["count"] == 1
+
+    llm_client._LLM_CACHE.clear()  # noqa: SLF001
+    llm_client._LLM_CACHE_LOADED = False  # noqa: SLF001
+
+    second = llm_client.analyze_signal(payload)
+    assert second.cache_hit is True
+    assert calls["count"] == 1
+    assert (cache_dir / "cache.json").exists()
+
+
+def test_backend_order_respects_llm_profile(monkeypatch):
+    monkeypatch.setattr(llm_client, "LLM_PROVIDER", "auto")
+    monkeypatch.setattr(llm_client, "LLM_PROFILE", "speed")
+    assert llm_client._backend_order("signal_analysis") == ["ollama", "openai", "fallback"]  # noqa: SLF001
+
+    monkeypatch.setattr(llm_client, "LLM_PROFILE", "quality")
+    assert llm_client._backend_order("signal_analysis") == ["openai", "ollama", "fallback"]  # noqa: SLF001
+    assert llm_client._backend_order("report_section") == ["openai", "ollama", "fallback"]  # noqa: SLF001
+
+
+def test_temporary_llm_profile_overrides_runtime(monkeypatch):
+    monkeypatch.setattr(llm_client, "LLM_PROFILE", "balanced")
+    assert llm_client.effective_llm_profile() == "balanced"
+
+    with llm_client.temporary_llm_profile("speed") as active:
+        assert active == "speed"
+        assert llm_client.effective_llm_profile() == "speed"
+        assert llm_client._backend_order("signal_analysis") == ["ollama", "openai", "fallback"]  # noqa: SLF001
+
+    assert llm_client.effective_llm_profile() == "balanced"
 
 
 def test_request_budget_stop_behavior(tmp_path):

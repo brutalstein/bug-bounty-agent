@@ -47,6 +47,9 @@ class AutonomousDecisionSummary:
     strategy_source: str
     strategy_support_runs: int
     exploration_pack: str
+    recommended_llm_profile: str
+    llm_profile_source: str
+    llm_profile_reason: str
     recommended_targets: list[str]
     strongest_hotspots: list[dict]
     hypothesis_stage_counts: dict[str, int]
@@ -97,6 +100,7 @@ class AutonomousDecisionEngine:
             final_report.get("candidate_items", final_report.get("final_report_candidate_items", 0))
         )
         review_queue_start_now = int(review_queue.get("start_now_count", 0))
+        signals_high_or_critical = int(signals.get("critical_count", 0)) + int(signals.get("high_count", 0))
         boundary_hotspot_count = len(hotspots)
         unresolved_hypotheses = [
             item
@@ -128,6 +132,9 @@ class AutonomousDecisionEngine:
         strategy_source = "focus_default"
         strategy_support_runs = 0
         exploration_pack = ""
+        recommended_llm_profile = "balanced"
+        llm_profile_source = "focus_default"
+        llm_profile_reason = "Balanced profile is the safe default for mixed passive triage."
         rationale: list[str] = []
 
         strongest_hotspot = hotspots[0] if hotspots else None
@@ -289,6 +296,20 @@ class AutonomousDecisionEngine:
             recommended_method_sequence=recommended_method_sequence,
             strategy_intelligence=strategy_intelligence,
         )
+        (
+            recommended_llm_profile,
+            llm_profile_source,
+            llm_profile_reason,
+        ) = self._recommend_llm_profile(
+            decision=decision,
+            next_cycle_focus=next_cycle_focus,
+            boundary_hotspot_count=boundary_hotspot_count,
+            signals_high_or_critical=signals_high_or_critical,
+            review_queue_start_now=review_queue_start_now,
+            final_report_candidates=final_report_candidates,
+            strategy_source=strategy_source,
+            strategy_support_runs=strategy_support_runs,
+        )
 
         summary = AutonomousDecisionSummary(
             target=str(run_data.get("target_url", "unknown")),
@@ -312,6 +333,9 @@ class AutonomousDecisionEngine:
             strategy_source=strategy_source,
             strategy_support_runs=strategy_support_runs,
             exploration_pack=exploration_pack,
+            recommended_llm_profile=recommended_llm_profile,
+            llm_profile_source=llm_profile_source,
+            llm_profile_reason=llm_profile_reason,
             recommended_targets=recommended_targets,
             strongest_hotspots=[item.to_dict() for item in hotspots[:5]],
             hypothesis_stage_counts=hypothesis_stage_counts,
@@ -623,6 +647,71 @@ class AutonomousDecisionEngine:
 
         return selected_pack, selected_methods, strategy_source, support_runs, exploration_pack
 
+    def _recommend_llm_profile(
+        self,
+        *,
+        decision: str,
+        next_cycle_focus: str,
+        boundary_hotspot_count: int,
+        signals_high_or_critical: int,
+        review_queue_start_now: int,
+        final_report_candidates: int,
+        strategy_source: str,
+        strategy_support_runs: int,
+    ) -> tuple[str, str, str]:
+        if decision in {"stop_for_human_review", "pause_for_manual_approval"} or final_report_candidates > 0:
+            return (
+                "quality",
+                "decision_threshold",
+                "Human-review or manual-approval thresholds were crossed, so deeper reasoning is preferred.",
+            )
+
+        if next_cycle_focus == "boundary_hotspot_recon" and boundary_hotspot_count > 0:
+            return (
+                "quality",
+                "focus_boundary_hotspot",
+                "Boundary/cache/auth hotspots benefit from slower, higher-fidelity reasoning.",
+            )
+
+        if next_cycle_focus in {"session_boundary_recon", "api_boundary_recon", "manual_auth_diff"}:
+            return (
+                "balanced",
+                "focus_boundary_mapping",
+                "Boundary-oriented passive investigation needs more depth than developer-surface exploration without paying the full quality cost.",
+            )
+
+        if next_cycle_focus == "developer_surface_recon":
+            if strategy_source in {"learned_recent_runs", "exploration_rebalance"} and strategy_support_runs >= 2:
+                return (
+                    "speed",
+                    "learned_efficiency_bias",
+                    "Recent runs support a lower-latency developer-surface pass before spending more tokens on deeper reasoning.",
+                )
+            if signals_high_or_critical > 0 or review_queue_start_now > 0:
+                return (
+                    "balanced",
+                    "focus_with_signal_pressure",
+                    "Developer-surface findings still need moderate reasoning depth because actionable signals already exist.",
+                )
+            return (
+                "speed",
+                "focus_surface_expansion",
+                "Low-pressure developer-surface exploration is best served by the fastest safe reasoning profile.",
+            )
+
+        if signals_high_or_critical > 0 or review_queue_start_now > 0:
+            return (
+                "balanced",
+                "signal_pressure_default",
+                "Signals are present, so the operator should keep moderate reasoning depth while preserving throughput.",
+            )
+
+        return (
+            "speed",
+            "default_low_pressure",
+            "No strong signal pressure exists yet, so the operator can favor throughput.",
+        )
+
     def _strategy_pack_support(self, strategy_intelligence, focus: str, strategy_pack: str) -> int:
         pack_scores = getattr(strategy_intelligence, "pack_scores", []) or []
         for item in pack_scores:
@@ -774,6 +863,9 @@ class AutonomousDecisionEngine:
         lines.append(f"- **Strategy Source:** `{summary.strategy_source}`")
         lines.append(f"- **Strategy Support Runs:** `{summary.strategy_support_runs}`")
         lines.append(f"- **Exploration Pack:** `{summary.exploration_pack}`")
+        lines.append(f"- **Recommended LLM Profile:** `{summary.recommended_llm_profile}`")
+        lines.append(f"- **LLM Profile Source:** `{summary.llm_profile_source}`")
+        lines.append(f"- **LLM Profile Reason:** `{summary.llm_profile_reason}`")
         lines.append("")
         if summary.rationale:
             lines.append("## Rationale")

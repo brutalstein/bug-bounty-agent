@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 import hashlib
 import json
@@ -16,15 +17,24 @@ from core.redactor import EvidenceRedactor
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5.4-mini").strip()
+OPENAI_REASONING_MODEL = os.getenv("OPENAI_REASONING_MODEL", OPENAI_MODEL).strip()
+OPENAI_REPORT_MODEL = os.getenv("OPENAI_REPORT_MODEL", OPENAI_MODEL).strip()
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434").rstrip("/")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen3:8b").strip()
+OLLAMA_REPORT_MODEL = os.getenv("OLLAMA_REPORT_MODEL", OLLAMA_MODEL).strip()
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "auto").strip().lower()
+LLM_PROFILE = os.getenv("LLM_PROFILE", "balanced").strip().lower()
 LLM_TIMEOUT = int(os.getenv("LLM_TIMEOUT_SECONDS", "30"))
 _UNSET = object()
-_OLLAMA_MODEL_CACHE: str | None | object = _UNSET
+_RUNTIME_LLM_PROFILE: str | None = None
+_OLLAMA_MODEL_CACHE: dict[str, str | None | object] = {}
 _REDACTOR = EvidenceRedactor()
 _LLM_CACHE: dict[str, "LLMResponse"] = {}
+_LLM_CACHE_STORE: dict[str, dict] = {}
+_LLM_CACHE_LOADED = False
 _LLM_TRACE_PATH: Path | None = None
+_LLM_CACHE_DIR = Path(os.getenv("BB_LLM_CACHE_DIR", "runs/.state/llm_cache"))
+_LLM_CACHE_FILE = _LLM_CACHE_DIR / "cache.json"
 
 ANALYSIS_SYSTEM_PROMPT = (
     "You are a senior bug bounty triage assistant reviewing authorized, read-only scan results. "
@@ -58,11 +68,55 @@ def configure_trace_file(path: str | Path | None) -> None:
     _LLM_TRACE_PATH.touch(exist_ok=True)
 
 
+def configure_cache_dir(path: str | Path | None) -> None:
+    global _LLM_CACHE_DIR, _LLM_CACHE_FILE, _LLM_CACHE_LOADED, _LLM_CACHE, _LLM_CACHE_STORE
+    if path is None:
+        _LLM_CACHE_DIR = Path("runs/.state/llm_cache")
+    else:
+        _LLM_CACHE_DIR = Path(path)
+    _LLM_CACHE_FILE = _LLM_CACHE_DIR / "cache.json"
+    _LLM_CACHE = {}
+    _LLM_CACHE_STORE = {}
+    _LLM_CACHE_LOADED = False
+
+
+def effective_llm_profile() -> str:
+    configured = _RUNTIME_LLM_PROFILE
+    if configured is None:
+        configured = os.getenv("LLM_PROFILE", LLM_PROFILE)
+    normalized = str(configured or "").strip().lower()
+    return normalized if normalized in {"speed", "balanced", "quality"} else "balanced"
+
+
+@contextmanager
+def temporary_llm_profile(profile: str | None):
+    global _RUNTIME_LLM_PROFILE
+    previous_runtime = _RUNTIME_LLM_PROFILE
+    previous_env = os.environ.get("LLM_PROFILE")
+    normalized = str(profile or "").strip().lower()
+    applied = normalized if normalized in {"speed", "balanced", "quality"} else None
+    _RUNTIME_LLM_PROFILE = applied
+    if applied is None:
+        os.environ.pop("LLM_PROFILE", None)
+    else:
+        os.environ["LLM_PROFILE"] = applied
+    try:
+        yield effective_llm_profile()
+    finally:
+        _RUNTIME_LLM_PROFILE = previous_runtime
+        if previous_env is None:
+            os.environ.pop("LLM_PROFILE", None)
+        else:
+            os.environ["LLM_PROFILE"] = previous_env
+
+
 def is_openai_available() -> bool:
     return bool(OPENAI_API_KEY)
 
 
-def is_ollama_available() -> bool:
+def is_ollama_available(task: str | None = None) -> bool:
+    if task:
+        return _resolved_ollama_model_name_for_task(task) is not None
     return _resolved_ollama_model_name() is not None
 
 
@@ -70,7 +124,7 @@ def current_llm_backend(task: str = "analysis") -> str:
     for backend in _backend_order(task):
         if backend == "openai" and is_openai_available():
             return "openai"
-        if backend == "ollama" and is_ollama_available():
+        if backend == "ollama" and is_ollama_available(task):
             return "ollama"
         if backend == "fallback":
             return "fallback"
@@ -120,10 +174,12 @@ def _run_json_task(
     fallback_payload: dict,
     normalizer,
 ) -> LLMResponse:
+    _ensure_persistent_cache_loaded()
     backend_order = _backend_order(task)
     cache_key = _make_cache_key(task, payload, backend_order)
     cached = _LLM_CACHE.get(cache_key)
     if cached is not None:
+        _touch_cache_entry(cache_key)
         response = LLMResponse(
             text=cached.text,
             success=cached.success,
@@ -146,14 +202,15 @@ def _run_json_task(
 
     for backend in backend_order:
         if backend == "openai" and is_openai_available():
-            raw_response = _call_openai(prompt, task=task)
-            response = _normalize_backend_response(raw_response, normalizer, model=OPENAI_MODEL, backend="openai")
+            model_name = _openai_model_for_task(task)
+            raw_response = _call_openai(prompt, task=task, model_name=model_name)
+            response = _normalize_backend_response(raw_response, normalizer, model=model_name, backend="openai")
             if response is not None:
-                _LLM_CACHE[cache_key] = response
+                _cache_response(cache_key, response)
                 _write_trace(
                     task=task,
                     backend="openai",
-                    model=OPENAI_MODEL,
+                    model=model_name,
                     cache_hit=False,
                     fallback_used=False,
                     schema_valid=True,
@@ -161,16 +218,27 @@ def _run_json_task(
                     payload=payload,
                 )
                 return response
-        elif backend == "ollama" and is_ollama_available():
-            resolved_model = _resolved_ollama_model_name()
-            raw_response = _call_ollama(prompt, task=task)
-            response = _normalize_backend_response(raw_response, normalizer, model=resolved_model or OLLAMA_MODEL, backend="ollama")
+            if raw_response is not None:
+                _write_trace(
+                    task=task,
+                    backend="openai",
+                    model=model_name,
+                    cache_hit=False,
+                    fallback_used=False,
+                    schema_valid=False,
+                    redaction_applied=True,
+                    payload=payload,
+                )
+        elif backend == "ollama" and is_ollama_available(task):
+            resolved_model = _resolved_ollama_model_name_for_task(task)
+            raw_response = _call_ollama(prompt, task=task, model_name=resolved_model)
+            response = _normalize_backend_response(raw_response, normalizer, model=resolved_model or _ollama_model_for_task(task), backend="ollama")
             if response is not None:
-                _LLM_CACHE[cache_key] = response
+                _cache_response(cache_key, response)
                 _write_trace(
                     task=task,
                     backend="ollama",
-                    model=resolved_model or OLLAMA_MODEL,
+                    model=resolved_model or _ollama_model_for_task(task),
                     cache_hit=False,
                     fallback_used=False,
                     schema_valid=True,
@@ -178,6 +246,17 @@ def _run_json_task(
                     payload=payload,
                 )
                 return response
+            if raw_response is not None:
+                _write_trace(
+                    task=task,
+                    backend="ollama",
+                    model=resolved_model or _ollama_model_for_task(task),
+                    cache_hit=False,
+                    fallback_used=False,
+                    schema_valid=False,
+                    redaction_applied=True,
+                    payload=payload,
+                )
         elif backend == "fallback":
             break
 
@@ -188,7 +267,7 @@ def _run_json_task(
         fallback_used=True,
         backend="fallback",
     )
-    _LLM_CACHE[cache_key] = fallback_response
+    _cache_response(cache_key, fallback_response)
     _write_trace(
         task=task,
         backend="fallback",
@@ -211,9 +290,13 @@ def _backend_order(task: str) -> list[str]:
     if LLM_PROVIDER == "fallback":
         return ["fallback"]
 
-    if task == "report_section":
+    profile = effective_llm_profile()
+    if profile == "speed":
         return ["ollama", "openai", "fallback"]
-
+    if profile == "quality":
+        return ["openai", "ollama", "fallback"]
+    if task == "report_section":
+        return ["openai", "ollama", "fallback"]
     return ["ollama", "openai", "fallback"]
 
 
@@ -243,15 +326,18 @@ def _normalize_backend_response(
     )
 
 
-def _call_openai(prompt: str, task: str) -> str | None:
+def _call_openai(prompt: str, task: str, model_name: str) -> str | None:
     if not is_openai_available():
         return None
 
+    reasoning_effort = "low"
+    if effective_llm_profile() == "quality" or task == "report_section":
+        reasoning_effort = "medium"
     body = json.dumps(
         {
-            "model": OPENAI_MODEL,
+            "model": model_name,
             "input": prompt,
-            "reasoning": {"effort": "low"},
+            "reasoning": {"effort": reasoning_effort},
         }
     ).encode("utf-8")
     request = urllib.request.Request(
@@ -292,13 +378,12 @@ def _call_openai(prompt: str, task: str) -> str | None:
     return None
 
 
-def _call_ollama(prompt: str, task: str) -> str | None:
-    model_name = _resolved_ollama_model_name()
+def _call_ollama(prompt: str, task: str, model_name: str | None = None) -> str | None:
+    model_name = model_name or _resolved_ollama_model_name()
     if not model_name:
         return None
 
-    num_predict = 220 if task == "signal_analysis" else 420
-    temperature = 0.0 if task == "signal_analysis" else 0.15
+    task_options = _ollama_task_options(task)
     body = json.dumps(
         {
             "model": model_name,
@@ -306,8 +391,8 @@ def _call_ollama(prompt: str, task: str) -> str | None:
             "stream": False,
             "think": False,
             "options": {
-                "temperature": temperature,
-                "num_predict": num_predict,
+                "temperature": task_options["temperature"],
+                "num_predict": task_options["num_predict"],
             },
         }
     ).encode("utf-8")
@@ -346,23 +431,31 @@ def _fetch_ollama_tags() -> list[dict] | None:
 
 
 def _resolved_ollama_model_name() -> str | None:
-    global _OLLAMA_MODEL_CACHE
+    return _resolve_ollama_model_name(OLLAMA_MODEL)
 
-    if _OLLAMA_MODEL_CACHE is not _UNSET:
-        return _OLLAMA_MODEL_CACHE
+
+def _resolved_ollama_model_name_for_task(task: str) -> str | None:
+    return _resolve_ollama_model_name(_ollama_model_for_task(task))
+
+
+def _resolve_ollama_model_name(requested_model: str | None) -> str | None:
+    cache_key = str(requested_model or "").strip().lower() or "__default__"
+    cached = _OLLAMA_MODEL_CACHE.get(cache_key, _UNSET)
+    if cached is not _UNSET:
+        return cached if isinstance(cached, str) else None
 
     tags = _fetch_ollama_tags()
     if tags is None:
-        _OLLAMA_MODEL_CACHE = None
+        _OLLAMA_MODEL_CACHE[cache_key] = None
         return None
 
-    requested_model = OLLAMA_MODEL.strip().lower()
+    normalized_requested = str(requested_model or "").strip().lower()
     for model in tags:
         if not isinstance(model, dict):
             continue
         name = str(model.get("name", "")).strip()
-        if name.lower() == requested_model:
-            _OLLAMA_MODEL_CACHE = name
+        if normalized_requested and name.lower() == normalized_requested:
+            _OLLAMA_MODEL_CACHE[cache_key] = name
             return name
 
     for model in tags:
@@ -370,11 +463,42 @@ def _resolved_ollama_model_name() -> str | None:
             continue
         name = str(model.get("name", "")).strip()
         if name:
-            _OLLAMA_MODEL_CACHE = name
+            _OLLAMA_MODEL_CACHE[cache_key] = name
             return name
 
-    _OLLAMA_MODEL_CACHE = None
+    _OLLAMA_MODEL_CACHE[cache_key] = None
     return None
+
+
+def _openai_model_for_task(task: str) -> str:
+    if task == "report_section":
+        return OPENAI_REPORT_MODEL or OPENAI_MODEL
+    return OPENAI_REASONING_MODEL or OPENAI_MODEL
+
+
+def _ollama_model_for_task(task: str) -> str:
+    if task == "report_section":
+        return OLLAMA_REPORT_MODEL or OLLAMA_MODEL
+    return OLLAMA_MODEL
+
+
+def _ollama_task_options(task: str) -> dict[str, float | int]:
+    profile = effective_llm_profile()
+    presets = {
+        "speed": {
+            "signal_analysis": {"temperature": 0.0, "num_predict": 140},
+            "report_section": {"temperature": 0.1, "num_predict": 260},
+        },
+        "balanced": {
+            "signal_analysis": {"temperature": 0.0, "num_predict": 220},
+            "report_section": {"temperature": 0.15, "num_predict": 420},
+        },
+        "quality": {
+            "signal_analysis": {"temperature": 0.0, "num_predict": 320},
+            "report_section": {"temperature": 0.2, "num_predict": 620},
+        },
+    }
+    return dict(presets[profile].get(task, presets[profile]["signal_analysis"]))
 
 
 def _parse_json_response(text: str) -> dict | None:
@@ -417,6 +541,7 @@ def _make_cache_key(task: str, payload: dict, backend_order: list[str]) -> str:
     normalized = json.dumps(
         {
             "task": task,
+            "llm_profile": effective_llm_profile(),
             "backend_order": backend_order,
             "payload": payload,
         },
@@ -424,6 +549,81 @@ def _make_cache_key(task: str, payload: dict, backend_order: list[str]) -> str:
         sort_keys=True,
     )
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def _ensure_persistent_cache_loaded() -> None:
+    global _LLM_CACHE_LOADED, _LLM_CACHE_STORE, _LLM_CACHE
+    if _LLM_CACHE_LOADED:
+        return
+    _LLM_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    if _LLM_CACHE_FILE.exists():
+        try:
+            payload = json.loads(_LLM_CACHE_FILE.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            payload = {}
+        if isinstance(payload, dict):
+            _LLM_CACHE_STORE = payload
+            for key, raw in payload.items():
+                if not isinstance(raw, dict):
+                    continue
+                _LLM_CACHE[key] = LLMResponse(
+                    text=str(raw.get("text", "")),
+                    success=bool(raw.get("success", True)),
+                    model=str(raw.get("model", "")),
+                    fallback_used=bool(raw.get("fallback_used", False)),
+                    backend=str(raw.get("backend", "fallback")),
+                    cache_hit=False,
+                )
+    _LLM_CACHE_LOADED = True
+
+
+def _cache_response(cache_key: str, response: LLMResponse) -> None:
+    _LLM_CACHE[cache_key] = response
+    _LLM_CACHE_STORE[cache_key] = {
+        "text": response.text,
+        "success": response.success,
+        "model": response.model,
+        "fallback_used": response.fallback_used,
+        "backend": response.backend,
+        "created_at": _LLM_CACHE_STORE.get(cache_key, {}).get("created_at") or _now_iso(),
+        "last_used_at": _now_iso(),
+    }
+    _persist_cache_store()
+
+
+def _touch_cache_entry(cache_key: str) -> None:
+    entry = _LLM_CACHE_STORE.get(cache_key)
+    if not isinstance(entry, dict):
+        return
+    entry["last_used_at"] = _now_iso()
+    _persist_cache_store()
+
+
+def _persist_cache_store(max_entries: int = 512) -> None:
+    _LLM_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    items = [
+        (key, value)
+        for key, value in _LLM_CACHE_STORE.items()
+        if isinstance(value, dict)
+    ]
+    items.sort(key=lambda item: str(item[1].get("last_used_at", "")), reverse=True)
+    trimmed = dict(items[:max_entries])
+    _LLM_CACHE_STORE.clear()
+    _LLM_CACHE_STORE.update(trimmed)
+    active_keys = set(trimmed)
+    for key in list(_LLM_CACHE):
+        if key not in active_keys:
+            _LLM_CACHE.pop(key, None)
+    _LLM_CACHE_FILE.write_text(
+        json.dumps(trimmed, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+
+def _now_iso() -> str:
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc).isoformat()
 
 
 def _write_trace(

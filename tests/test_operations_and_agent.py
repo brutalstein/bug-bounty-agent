@@ -8,6 +8,7 @@ from pathlib import Path
 from app.commands.recon_commands import high_value_recon_phase_limit
 from app.commands.operations import command_self_test
 from app.commands.report_commands import refresh_run_artifacts
+from core import llm_client
 from core.autonomous_agent import AutonomousAgent
 from core.run_context import create_run_context
 from core.scope import ScopeManager
@@ -56,6 +57,12 @@ def test_authorized_cycle_plans_skip_redundant_report_refresh():
             settings = plan.get("surface_recon_settings", {})
             assert settings.get("max_endpoints", 0) >= 25
             assert settings.get("max_passive_surfaces", 0) >= 8
+            deep_hunt_follow_up = next(
+                (item for item in plan.get("follow_ups", []) if item.get("label") == "Policy-safe deep hunt refresh"),
+                None,
+            )
+            assert deep_hunt_follow_up is not None
+            assert deep_hunt_follow_up.get("llm_profile") in {"speed", "balanced"}
 
 
 def test_surface_recon_settings_expand_for_airtable_capabilities():
@@ -178,6 +185,9 @@ def test_decision_driven_plan_carries_strategy_pack(tmp_path):
         "deep_hunt_escalated": 0,
         "deep_hunt_ruled_out": 0,
         "top_signal_types": ["BROKEN_ACCESS_CONTROL"],
+        "recommended_llm_profile": "quality",
+        "llm_profile_source": "focus_boundary_hotspot",
+        "llm_profile_reason": "Boundary hotspots deserve deeper reasoning.",
     }
     from core.autonomous_agent import RunEvaluation
 
@@ -192,6 +202,7 @@ def test_decision_driven_plan_carries_strategy_pack(tmp_path):
     assert follow_up["kind"] == "deep_hunt"
     assert follow_up["strategy_pack"] == "boundary_cache_auth_investigator"
     assert follow_up["signal_type"] == "BROKEN_ACCESS_CONTROL"
+    assert follow_up["llm_profile"] == "quality"
     assert follow_up["preferred_methods"][:2] == [
         "session_boundary_evidence_review",
         "cache_auth_boundary_investigator",
@@ -238,6 +249,9 @@ def test_apply_decision_strategy_to_plan_updates_deep_hunt_follow_up():
         deep_hunt_escalated=0,
         deep_hunt_ruled_out=0,
         top_signal_types=["INFO_DISCLOSURE"],
+        recommended_llm_profile="balanced",
+        llm_profile_source="focus_boundary_mapping",
+        llm_profile_reason="Session boundary review needs balanced depth.",
     )
     plan = {
         "flow_name": "surface-recon",
@@ -255,10 +269,44 @@ def test_apply_decision_strategy_to_plan_updates_deep_hunt_follow_up():
     follow_up = updated["follow_ups"][1]
     assert follow_up["signal_type"] == "INFO_DISCLOSURE"
     assert follow_up["strategy_pack"] == "session_boundary_mapper"
+    assert follow_up["llm_profile"] == "balanced"
     assert follow_up["preferred_methods"] == [
         "session_boundary_evidence_review",
         "readonly_variant_matrix_review",
     ]
+
+
+def test_execute_follow_up_applies_llm_profile(monkeypatch, tmp_path):
+    agent = AutonomousAgent(".")
+    observed = {}
+
+    def fake_run_deep_hunt_internal(run_dir, **kwargs):
+        observed["run_dir"] = str(run_dir)
+        observed["kwargs"] = dict(kwargs)
+        observed["llm_profile"] = llm_client.effective_llm_profile()
+        return 0
+
+    monkeypatch.setattr("core.autonomous_agent.run_deep_hunt_internal", fake_run_deep_hunt_internal)
+
+    run_dir = tmp_path / "run-llm-profile"
+    run_dir.mkdir()
+    agent.execute_follow_up(
+        {
+            "label": "Policy-safe deep hunt refresh",
+            "kind": "deep_hunt",
+            "signal_type": "INFO_DISCLOSURE",
+            "strategy_pack": "developer_surface_expander",
+            "preferred_methods": ["js_context_review"],
+            "llm_profile": "speed",
+        },
+        run_dir,
+    )
+
+    assert observed["run_dir"] == str(run_dir)
+    assert observed["kwargs"]["signal_type"] == "INFO_DISCLOSURE"
+    assert observed["kwargs"]["strategy_pack"] == "developer_surface_expander"
+    assert observed["kwargs"]["preferred_methods"] == ["js_context_review"]
+    assert observed["llm_profile"] == "speed"
 
 
 def test_decision_driven_plan_prefers_unsuppressed_targets(tmp_path):
@@ -313,6 +361,9 @@ def test_decision_driven_plan_prefers_unsuppressed_targets(tmp_path):
         deep_hunt_escalated=0,
         deep_hunt_ruled_out=1,
         top_signal_types=["INFO_DISCLOSURE"],
+        recommended_llm_profile="speed",
+        llm_profile_source="focus_surface_expansion",
+        llm_profile_reason="Developer exploration can stay fast.",
     )
 
     plan = agent._decision_driven_plan(scope, evaluation, used_targets=[])  # noqa: SLF001

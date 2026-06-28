@@ -291,15 +291,22 @@ class DeepHunter:
             signal = handler(signal)
             iteration_count += 1
             signal["methods_tried"].append(method_name)
+            confidence_after = float(signal.get("confidence", 0.0))
+            findings_delta = max(len(signal.get("findings", [])) - findings_before, 0)
             self.strategy_memory.record_method_result(
                 signal_key=signal_key,
                 endpoint_family=self._endpoint_family(str(signal.get("endpoint", ""))),
                 method=method_name,
                 confidence_before=confidence_before,
-                confidence_after=float(signal.get("confidence", 0.0)),
-                findings_delta=max(len(signal.get("findings", [])) - findings_before, 0),
+                confidence_after=confidence_after,
+                findings_delta=findings_delta,
             )
-            self._post_method_llm_review(signal, available_methods)
+            self._post_method_llm_review(
+                signal,
+                available_methods,
+                confidence_delta=round(confidence_after - confidence_before, 4),
+                findings_delta=findings_delta,
+            )
 
         if signal.get("status") == "investigating":
             if float(signal.get("confidence", 0.0)) >= 0.85 and self._has_high_value_evidence(signal):
@@ -491,6 +498,8 @@ class DeepHunter:
         return None
 
     def _select_next_method(self, signal: dict, available_methods: list[str]) -> str:
+        if len(available_methods) <= 1:
+            return available_methods[0] if available_methods else "stop"
         if not self._should_use_llm(signal, stage="method_selection"):
             return available_methods[0] if available_methods else "stop"
 
@@ -508,8 +517,21 @@ class DeepHunter:
             return next_step
         return available_methods[0] if available_methods else "stop"
 
-    def _post_method_llm_review(self, signal: dict, available_methods: list[str]) -> None:
-        if not self._should_use_llm(signal, stage="post_method_review"):
+    def _post_method_llm_review(
+        self,
+        signal: dict,
+        available_methods: list[str],
+        *,
+        confidence_delta: float,
+        findings_delta: int,
+    ) -> None:
+        if not self._should_use_llm(
+            signal,
+            stage="post_method_review",
+            confidence_delta=confidence_delta,
+            findings_delta=findings_delta,
+            available_method_count=len(available_methods),
+        ):
             return
 
         response = self._run_signal_llm_review(
@@ -526,7 +548,15 @@ class DeepHunter:
             if payload.get("report_ready") is True and self._has_high_value_evidence(signal):
                 signal["confidence"] = max(float(signal.get("confidence", 0.0)), 0.9)
 
-    def _should_use_llm(self, signal: dict, stage: str) -> bool:
+    def _should_use_llm(
+        self,
+        signal: dict,
+        stage: str,
+        *,
+        confidence_delta: float = 0.0,
+        findings_delta: int = 0,
+        available_method_count: int = 0,
+    ) -> bool:
         if self.llm_backend == "fallback" and stage != "report_section":
             return False
 
@@ -540,6 +570,9 @@ class DeepHunter:
         if self.llm_review_budget_used >= self.llm_review_budget_limit:
             return False
 
+        if stage == "method_selection" and available_method_count <= 1:
+            return False
+
         if priority not in {"CRITICAL", "HIGH"} and not llm_candidate and confidence < 0.75:
             return False
 
@@ -549,6 +582,12 @@ class DeepHunter:
 
         if stage in {"method_selection", "post_method_review"} and self.llm_signal_counts.get(self._signal_key(signal), 0) >= 2:
             return False
+
+        if stage == "post_method_review":
+            if findings_delta <= 0 and abs(confidence_delta) < 0.03 and not llm_candidate and priority != "CRITICAL":
+                return False
+            if findings_delta <= 0 and abs(confidence_delta) < 0.02 and available_method_count <= 2:
+                return False
 
         if stage == "report_section" and not self._has_high_value_evidence(signal):
             return False

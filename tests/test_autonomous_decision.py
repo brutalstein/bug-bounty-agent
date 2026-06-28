@@ -85,6 +85,8 @@ def test_autonomous_decision_recommends_boundary_focus(tmp_path):
     assert summary.boundary_hotspot_count == 1
     assert summary.recommended_strategy_pack == "boundary_cache_auth_investigator"
     assert summary.recommended_signal_type == "BROKEN_ACCESS_CONTROL"
+    assert summary.recommended_llm_profile == "quality"
+    assert summary.llm_profile_source == "focus_boundary_hotspot"
     assert summary.retryable_hypothesis_count >= 0
     assert isinstance(summary.hypothesis_stage_counts, dict)
     assert summary.recommended_method_sequence[:3] == [
@@ -158,6 +160,8 @@ def test_autonomous_decision_stops_for_manual_approval_threshold(tmp_path):
     assert summary.manual_approval_recommended is True
     assert summary.recommended_strategy_pack == "manual_auth_boundary_diff"
     assert summary.recommended_signal_type == "SENSITIVE_DATA"
+    assert summary.recommended_llm_profile == "quality"
+    assert summary.llm_profile_source == "decision_threshold"
     assert summary.hypothesis_stage_counts
     assert summary.exploration_pack in {"", "boundary_cache_auth_investigator"}
     assert "session-compare-run" in summary.manual_approval_command
@@ -242,6 +246,7 @@ def test_autonomous_decision_uses_unresolved_hypothesis_when_hotspots_are_weak(t
     assert summary.stop_reason == "unresolved_readonly_hypotheses_remain"
     assert summary.next_cycle_focus in {"boundary_hotspot_recon", "session_boundary_recon", "api_boundary_recon"}
     assert summary.recommended_signal_type == "BROKEN_ACCESS_CONTROL"
+    assert summary.recommended_llm_profile in {"quality", "balanced"}
     assert summary.recommended_method_sequence
     assert summary.retryable_hypothesis_count >= 1
 

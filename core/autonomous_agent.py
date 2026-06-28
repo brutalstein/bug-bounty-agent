@@ -31,6 +31,7 @@ from core.autonomous_decision import AutonomousDecisionEngine
 from core.console import print_status
 from core.http_client import SafeHttpClient
 from core.lab_manager import LabManager
+from core.llm_client import temporary_llm_profile
 from core.operator_memory import OperatorMemoryAnalyzer, OperatorMemorySummary
 from core.profile_readiness import ProfileReadinessAssessor
 from core.run_catalog import list_run_dirs as list_real_run_dirs
@@ -98,6 +99,9 @@ class RunEvaluation:
     deep_hunt_escalated: int
     deep_hunt_ruled_out: int
     top_signal_types: list[str]
+    recommended_llm_profile: str = "balanced"
+    llm_profile_source: str = "focus_default"
+    llm_profile_reason: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -541,6 +545,7 @@ class AutonomousAgent:
                             {
                                 "label": "Policy-safe deep hunt refresh",
                                 "argv": ["deep-hunt", "{run_dir}"],
+                                "llm_profile": "balanced",
                             },
                         ],
                     }
@@ -574,6 +579,7 @@ class AutonomousAgent:
                         {
                             "label": "Policy-safe deep hunt refresh",
                             "kind": "deep_hunt",
+                            "llm_profile": "balanced",
                         },
                     ],
                 }
@@ -609,6 +615,7 @@ class AutonomousAgent:
                             {
                                 "label": "Policy-safe deep hunt refresh",
                                 "kind": "deep_hunt",
+                                "llm_profile": "balanced",
                             },
                         ],
                     }
@@ -642,6 +649,7 @@ class AutonomousAgent:
                             {
                                 "label": "Policy-safe deep hunt refresh",
                                 "kind": "deep_hunt",
+                                "llm_profile": "speed",
                             },
                         ],
                     }
@@ -714,6 +722,9 @@ class AutonomousAgent:
             strategy_source=decision_summary.strategy_source,
             strategy_support_runs=decision_summary.strategy_support_runs,
             exploration_pack=decision_summary.exploration_pack,
+            recommended_llm_profile=decision_summary.recommended_llm_profile,
+            llm_profile_source=decision_summary.llm_profile_source,
+            llm_profile_reason=decision_summary.llm_profile_reason,
             hypothesis_stage_counts=dict(decision_summary.hypothesis_stage_counts),
             retryable_hypothesis_count=decision_summary.retryable_hypothesis_count,
             suppressed_endpoint_families=list(decision_summary.suppressed_endpoint_families),
@@ -784,6 +795,9 @@ class AutonomousAgent:
             lines.append(f"- **Strategy Source:** `{evaluation.strategy_source}`")
             lines.append(f"- **Strategy Support Runs:** `{evaluation.strategy_support_runs}`")
             lines.append(f"- **Exploration Pack:** `{evaluation.exploration_pack}`")
+            lines.append(f"- **Recommended LLM Profile:** `{evaluation.recommended_llm_profile}`")
+            lines.append(f"- **LLM Profile Source:** `{evaluation.llm_profile_source}`")
+            lines.append(f"- **LLM Profile Reason:** `{evaluation.llm_profile_reason}`")
             lines.append(f"- **Hypothesis Stage Counts:** `{evaluation.hypothesis_stage_counts}`")
             lines.append(f"- **Retryable Hypotheses:** `{evaluation.retryable_hypothesis_count}`")
             lines.append(f"- **Suppressed Endpoint Families:** `{evaluation.suppressed_endpoint_families}`")
@@ -982,6 +996,7 @@ class AutonomousAgent:
                     "signal_type": evaluation.recommended_signal_type or None,
                     "strategy_pack": evaluation.recommended_strategy_pack or None,
                     "preferred_methods": list(evaluation.recommended_method_sequence),
+                    "llm_profile": evaluation.recommended_llm_profile or None,
                 },
             ],
         }
@@ -1038,6 +1053,8 @@ class AutonomousAgent:
                 follow_up["strategy_pack"] = evaluation.recommended_strategy_pack
             if evaluation.recommended_method_sequence:
                 follow_up["preferred_methods"] = list(evaluation.recommended_method_sequence)
+            if evaluation.recommended_llm_profile:
+                follow_up["llm_profile"] = evaluation.recommended_llm_profile
         return updated
 
     def execute_plan(self, plan: dict[str, Any]) -> None:
@@ -1054,13 +1071,14 @@ class AutonomousAgent:
                 return
             raise RuntimeError(f"`{follow_up['label']}` failed.")
         if kind == "deep_hunt":
-            if run_deep_hunt_internal(
-                run_dir,
-                signal_type=follow_up.get("signal_type"),
-                strategy_pack=follow_up.get("strategy_pack"),
-                preferred_methods=follow_up.get("preferred_methods"),
-            ) == 0:
-                return
+            with temporary_llm_profile(str(follow_up.get("llm_profile", "")).strip() or None):
+                if run_deep_hunt_internal(
+                    run_dir,
+                    signal_type=follow_up.get("signal_type"),
+                    strategy_pack=follow_up.get("strategy_pack"),
+                    preferred_methods=follow_up.get("preferred_methods"),
+                ) == 0:
+                    return
             raise RuntimeError(f"`{follow_up['label']}` failed.")
         if kind == "report_refresh":
             if run_report_refresh_internal(run_dir) == 0:
@@ -1326,6 +1344,8 @@ class AutonomousAgent:
         print_status("info", f"Strategy support runs: {evaluation.strategy_support_runs}")
         if evaluation.exploration_pack:
             print_status("info", f"Exploration pack: {evaluation.exploration_pack}")
+        print_status("info", f"LLM profile: {evaluation.recommended_llm_profile}")
+        print_status("info", f"LLM profile source: {evaluation.llm_profile_source}")
         print_status("info", f"Hypothesis stages: {evaluation.hypothesis_stage_counts}")
         print_status("info", f"Retryable hypotheses: {evaluation.retryable_hypothesis_count}")
         if evaluation.suppressed_endpoint_families:
